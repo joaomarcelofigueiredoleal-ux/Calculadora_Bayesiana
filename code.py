@@ -125,42 +125,51 @@ abas_principais = st.tabs([
 with abas_principais[0]:
     st.subheader("Teorema de Bayes - Atualização de Probabilidades (Discreto)")
 
-    c1, c2, c3, c4, c5 = st.columns([1, 1.5, 1.5, 1.2, 1])
-    num_estados = c1.number_input("Nº Opções:", min_value=2, max_value=10, value=2, step=1)
-    nome_evento = c2.text_input("Evento (Evidência - B):", value="Recessão")
-    termo_a = c3.text_input("Termo p/ A (ex: Premissa):", value="Premissa")
-    simbolo_a = c4.text_input("Símbolo p/ A (ex: A, H):", value="A")
-    casas_disc = c5.number_input("Casas decimais:", min_value=2, max_value=10, value=4, step=1)
+    # Fora do form para atualizar a quantidade de linhas imediatamente
+    num_estados = st.number_input("Nº Opções (Hipóteses):", min_value=2, max_value=10, value=2, step=1)
 
-    ev = nome_evento.strip() if nome_evento.strip() else "B"
-    t_a = termo_a.strip() if termo_a.strip() else "Opção"
-    s_a = simbolo_a.strip() if simbolo_a.strip() else "A"
+    with st.form("form_bayes_discreto"):
+        c2, c3, c4, c5 = st.columns([1.5, 1.5, 1.2, 1])
+        nome_evento = c2.text_input("Evento (Evidência - B):", value="Recessão")
+        termo_a = c3.text_input("Termo p/ A (ex: Premissa):", value="Premissa")
+        simbolo_a = c4.text_input("Símbolo p/ A (ex: A, H):", value="A")
+        casas_disc = c5.number_input("Casas decimais:", min_value=2, max_value=10, value=4, step=1)
+
+        ev = nome_evento.strip() if nome_evento.strip() else "B"
+        t_a = termo_a.strip() if termo_a.strip() else "Opção"
+        s_a = simbolo_a.strip() if simbolo_a.strip() else "A"
+
+        st.markdown("##### Defina as Probabilidades a Priori e as Verossimilhanças:")
+        estados_raw = []
+
+        for i in range(num_estados):
+            col_n, col_p, col_v = st.columns([1.5, 1.5, 1.5])
+            padrao_p = 0.80 if i == 0 else (0.20 if i == 1 else 0.0)
+            padrao_c = 0.05 if i == 0 else (0.50 if i == 1 else 0.0)
+
+            nome_input = col_n.text_input(
+                f"{t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
+            )
+            priori_val = col_p.number_input(
+                f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
+                step=0.01, format="%.4f", key=f"disc_p_{i}"
+            )
+            veros_val = col_v.number_input(
+                f"P({ev} | {s_a}{i+1}) [Verossim.]:", min_value=0.0, max_value=1.0, value=padrao_c,
+                step=0.01, format="%.4f", key=f"disc_v_{i}"
+            )
+            estados_raw.append((nome_input, priori_val, veros_val))
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+
     fmt_disc = f"{{:.{casas_disc}f}}"
     fmt_pct = f"{{:.{max(2, casas_disc - 2)}f}}%"
 
-    st.markdown("##### Defina as Probabilidades a Priori e as Verossimilhanças:")
     estados_dict = {}
-
-    for i in range(num_estados):
-        col_n, col_p, col_v = st.columns([1.5, 1.5, 1.5])
-        padrao_p = 0.80 if i == 0 else (0.20 if i == 1 else 0.0)
-        padrao_c = 0.05 if i == 0 else (0.50 if i == 1 else 0.0)
-
-        nome_input = col_n.text_input(
-            f"{t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
-        )
+    for i, (nome_input, priori_val, veros_val) in enumerate(estados_raw):
         nome_val = nome_input.strip() if nome_input.strip() else f"{s_a}{i+1}"
         if nome_val in estados_dict:
             nome_val = f"{nome_val} ({i+1})"
-
-        priori_val = col_p.number_input(
-            f"P({nome_val}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
-            step=0.01, format="%.4f", key=f"disc_p_{i}"
-        )
-        veros_val = col_v.number_input(
-            f"P({ev} | {nome_val}) [Verossim.]:", min_value=0.0, max_value=1.0, value=padrao_c,
-            step=0.01, format="%.4f", key=f"disc_v_{i}"
-        )
         estados_dict[nome_val] = [priori_val, veros_val]
 
     nomes_lista = list(estados_dict.keys())
@@ -279,16 +288,19 @@ with abas_principais[0]:
 # ==============================================================================
 with abas_principais[1]:
     st.subheader("Modelo Beta-Binomial (Proporções em 'n' ensaios fixos)")
-    c1, c2, c3, c4 = st.columns(4)
-    bb_a = c1.number_input("Priori 'a':", min_value=0.0001, value=4.0, step=0.5, key="bb_a")
-    bb_b = c2.number_input("Priori 'b':", min_value=0.0001, value=2.0, step=0.5, key="bb_b")
-    bb_n = c3.number_input("Ensaios (n):", min_value=1, value=4, step=1, key="bb_n")
-    bb_k = c4.number_input("Sucessos (k):", min_value=0, value=3, step=1, key="bb_k")
+    with st.form("form_bb"):
+        c1, c2, c3, c4 = st.columns(4)
+        bb_a = c1.number_input("Priori 'a':", min_value=0.0001, value=4.0, step=0.5, key="bb_a")
+        bb_b = c2.number_input("Priori 'b':", min_value=0.0001, value=2.0, step=0.5, key="bb_b")
+        bb_n = c3.number_input("Ensaios (n):", min_value=1, value=4, step=1, key="bb_n")
+        bb_k = c4.number_input("Sucessos (k):", min_value=0, value=3, step=1, key="bb_k")
 
-    c5, c6, c7 = st.columns(3)
-    bb_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.50, step=0.05, format="%.4f", key="bb_x1")
-    bb_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.80, step=0.05, format="%.4f", key="bb_x2")
-    bb_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bb_casas")
+        c5, c6, c7 = st.columns(3)
+        bb_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.50, step=0.05, format="%.4f", key="bb_x1")
+        bb_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.80, step=0.05, format="%.4f", key="bb_x2")
+        bb_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bb_casas")
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     if bb_k > bb_n:
         st.error("❌ Erro: O número de sucessos (k) não pode ser maior que o de ensaios (n).")
@@ -313,16 +325,19 @@ with abas_principais[1]:
 # ==============================================================================
 with abas_principais[2]:
     st.subheader("Modelo Beta-Geométrica (Ensaios até o 1º sucesso por sequência)")
-    c1, c2, c3, c4 = st.columns(4)
-    bg_a = c1.number_input("Priori 'a':", min_value=0.0001, value=6.0, step=0.5, key="bg_a")
-    bg_b = c2.number_input("Priori 'b':", min_value=0.0001, value=9.0, step=0.5, key="bg_b")
-    bg_n = c3.number_input("Total de Ensaios (n):", min_value=1, value=28, step=1, key="bg_n")
-    bg_m = c4.number_input("Sequências (sucessos):", min_value=1, value=12, step=1, key="bg_m")
+    with st.form("form_bg"):
+        c1, c2, c3, c4 = st.columns(4)
+        bg_a = c1.number_input("Priori 'a':", min_value=0.0001, value=6.0, step=0.5, key="bg_a")
+        bg_b = c2.number_input("Priori 'b':", min_value=0.0001, value=9.0, step=0.5, key="bg_b")
+        bg_n = c3.number_input("Total de Ensaios (n):", min_value=1, value=28, step=1, key="bg_n")
+        bg_m = c4.number_input("Sequências (sucessos):", min_value=1, value=12, step=1, key="bg_m")
 
-    c5, c6, c7 = st.columns(3)
-    bg_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.25, step=0.05, format="%.4f", key="bg_x1")
-    bg_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.62, step=0.05, format="%.4f", key="bg_x2")
-    bg_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bg_casas")
+        c5, c6, c7 = st.columns(3)
+        bg_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.25, step=0.05, format="%.4f", key="bg_x1")
+        bg_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.62, step=0.05, format="%.4f", key="bg_x2")
+        bg_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bg_casas")
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     if bg_m > bg_n:
         st.error("❌ Erro: O número de sequências não pode ser maior que o total de ensaios (n).")
@@ -347,16 +362,19 @@ with abas_principais[2]:
 # ==============================================================================
 with abas_principais[3]:
     st.subheader("Modelo Beta-Binomial Negativa (Ensaios até atingir 'r' sucessos)")
-    c1, c2, c3, c4 = st.columns(4)
-    bbn_a = c1.number_input("Priori 'a':", min_value=0.0001, value=12.0, step=0.5, key="bbn_a")
-    bbn_b = c2.number_input("Priori 'b':", min_value=0.0001, value=7.0, step=0.5, key="bbn_b")
-    bbn_n = c3.number_input("Total de Ensaios (n):", min_value=1, value=24, step=1, key="bbn_n")
-    bbn_r = c4.number_input("Sucessos fixos (r):", min_value=1, value=9, step=1, key="bbn_r")
+    with st.form("form_bbn"):
+        c1, c2, c3, c4 = st.columns(4)
+        bbn_a = c1.number_input("Priori 'a':", min_value=0.0001, value=12.0, step=0.5, key="bbn_a")
+        bbn_b = c2.number_input("Priori 'b':", min_value=0.0001, value=7.0, step=0.5, key="bbn_b")
+        bbn_n = c3.number_input("Total de Ensaios (n):", min_value=1, value=24, step=1, key="bbn_n")
+        bbn_r = c4.number_input("Sucessos fixos (r):", min_value=1, value=9, step=1, key="bbn_r")
 
-    c5, c6, c7 = st.columns(3)
-    bbn_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.4f", key="bbn_x1")
-    bbn_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.75, step=0.05, format="%.4f", key="bbn_x2")
-    bbn_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bbn_casas")
+        c5, c6, c7 = st.columns(3)
+        bbn_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.4f", key="bbn_x1")
+        bbn_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.75, step=0.05, format="%.4f", key="bbn_x2")
+        bbn_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bbn_casas")
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     if bbn_r > bbn_n:
         st.error("❌ Erro: O número de sucessos fixados (r) não pode ser maior que o total de ensaios (n).")
@@ -381,17 +399,20 @@ with abas_principais[3]:
 # ==============================================================================
 with abas_principais[4]:
     st.subheader("Modelo Gama-Poisson (Taxas de Contagem)")
-    c0, c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1, 1])
-    gp_param = c0.selectbox("Parametrização:", ["Escala (β)", "Taxa (β)"], key="gp_param")
-    gp_alpha = c1.number_input("Priori alfa (α):", min_value=0.0001, value=3.0, step=0.5, format="%.4f", key="gp_a")
-    gp_beta = c2.number_input("Priori beta (β):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="gp_b")
-    gp_n = c3.number_input("Períodos (n):", min_value=1, value=4, step=1, key="gp_n")
-    gp_soma = c4.number_input("Soma (Σx):", min_value=0, value=10, step=1, key="gp_soma")
+    with st.form("form_gp"):
+        c0, c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1, 1])
+        gp_param = c0.selectbox("Parametrização:", ["Escala (β)", "Taxa (β)"], key="gp_param")
+        gp_alpha = c1.number_input("Priori alfa (α):", min_value=0.0001, value=3.0, step=0.5, format="%.4f", key="gp_a")
+        gp_beta = c2.number_input("Priori beta (β):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="gp_b")
+        gp_n = c3.number_input("Períodos (n):", min_value=1, value=4, step=1, key="gp_n")
+        gp_soma = c4.number_input("Soma (Σx):", min_value=0, value=10, step=1, key="gp_soma")
 
-    c5, c6, c7 = st.columns(3)
-    gp_x1 = c5.number_input("Limite x1:", value=1.50, step=0.1, format="%.4f", key="gp_x1")
-    gp_x2 = c6.number_input("Limite x2:", value=3.70, step=0.1, format="%.4f", key="gp_x2")
-    gp_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="gp_casas")
+        c5, c6, c7 = st.columns(3)
+        gp_x1 = c5.number_input("Limite x1:", value=1.50, step=0.1, format="%.4f", key="gp_x1")
+        gp_x2 = c6.number_input("Limite x2:", value=3.70, step=0.1, format="%.4f", key="gp_x2")
+        gp_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="gp_casas")
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     a_post = gp_alpha + gp_soma
     if gp_param == "Escala (β)":
@@ -427,17 +448,20 @@ with abas_principais[4]:
 # ==============================================================================
 with abas_principais[5]:
     st.subheader("Modelo Gama-Exponencial (Tempos até Evento)")
-    c0, c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1, 1])
-    ge_param = c0.selectbox("Parametrização:", ["Escala (β)", "Taxa (β)"], key="ge_param")
-    ge_alpha = c1.number_input("Priori alfa (α):", min_value=0.0001, value=3.0, step=0.5, format="%.4f", key="ge_a")
-    ge_beta = c2.number_input("Priori beta (β):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="ge_b")
-    ge_n = c3.number_input("Observações (n):", min_value=1, value=5, step=1, key="ge_n")
-    ge_soma = c4.number_input("Soma dos tempos (Σx):", min_value=0.0001, value=5.0, step=0.5, format="%.4f", key="ge_soma")
+    with st.form("form_ge"):
+        c0, c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1, 1])
+        ge_param = c0.selectbox("Parametrização:", ["Escala (β)", "Taxa (β)"], key="ge_param")
+        ge_alpha = c1.number_input("Priori alfa (α):", min_value=0.0001, value=3.0, step=0.5, format="%.4f", key="ge_a")
+        ge_beta = c2.number_input("Priori beta (β):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="ge_b")
+        ge_n = c3.number_input("Observações (n):", min_value=1, value=5, step=1, key="ge_n")
+        ge_soma = c4.number_input("Soma dos tempos (Σx):", min_value=0.0001, value=5.0, step=0.5, format="%.4f", key="ge_soma")
 
-    c5, c6, c7 = st.columns(3)
-    ge_x1 = c5.number_input("Limite x1:", value=0.70, step=0.1, format="%.4f", key="ge_x1")
-    ge_x2 = c6.number_input("Limite x2:", value=1.60, step=0.1, format="%.4f", key="ge_x2")
-    ge_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="ge_casas")
+        c5, c6, c7 = st.columns(3)
+        ge_x1 = c5.number_input("Limite x1:", value=0.70, step=0.1, format="%.4f", key="ge_x1")
+        ge_x2 = c6.number_input("Limite x2:", value=1.60, step=0.1, format="%.4f", key="ge_x2")
+        ge_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="ge_casas")
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     a_post = ge_alpha + ge_n
     if ge_param == "Escala (β)":
@@ -471,8 +495,8 @@ with abas_principais[5]:
 with abas_principais[6]:
     st.subheader("Explorador de Distribuições de Probabilidade")
 
-    col_dist, col_p1, col_p2 = st.columns([1.4, 1, 1])
-    dist_escolhida = col_dist.selectbox(
+    # Fora do form para trocar os campos da distribuição instantaneamente
+    dist_escolhida = st.selectbox(
         "Selecione a Distribuição:",
         [
             "Binomial", "Poisson", "Binomial Negativa", "Geométrica",
@@ -484,110 +508,115 @@ with abas_principais[6]:
     is_discrete = False
     suporte_finito = False
 
-    if dist_escolhida == "Binomial":
-        n_val = col_p1.number_input("n (Ensaios):", min_value=1, value=10, step=1)
-        p_val = col_p2.number_input("p (Sucesso):", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.4f")
-        dist = binom(n=n_val, p=p_val)
-        nome_dist = f"Binomial(n={n_val}, p={p_val:g})"
-        is_discrete, suporte_finito = True, True
-        suporte_min, suporte_max = 0, n_val
+    with st.form("form_explorador"):
+        col_p1, col_p2 = st.columns(2)
 
-    elif dist_escolhida == "Poisson":
-        lam_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=4.0, step=0.5, format="%.4f")
-        xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
-        dist = poisson(mu=lam_val)
-        nome_dist = f"Poisson(λ={lam_val:g})"
-        is_discrete = True
-        suporte_min, suporte_max = 0, xmax_val
+        if dist_escolhida == "Binomial":
+            n_val = col_p1.number_input("n (Ensaios):", min_value=1, value=10, step=1)
+            p_val = col_p2.number_input("p (Sucesso):", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.4f")
+            dist = binom(n=n_val, p=p_val)
+            nome_dist = f"Binomial(n={n_val}, p={p_val:g})"
+            is_discrete, suporte_finito = True, True
+            suporte_min, suporte_max = 0, n_val
 
-    elif dist_escolhida == "Binomial Negativa":
-        r_val = col_p1.number_input("r (Sucessos):", min_value=1, value=5, step=1)
-        p_val = col_p2.number_input("p (Sucesso):", min_value=0.0001, max_value=1.0, value=0.30, step=0.05, format="%.4f")
-        xmax_val = st.number_input("x_max (Gráfico/Tabela):", min_value=1, value=25, step=1)
-        dist = nbinom(n=r_val, p=p_val)
-        nome_dist = f"Binomial Negativa(r={r_val}, p={p_val:g})"
-        is_discrete = True
-        suporte_min, suporte_max = 0, xmax_val
+        elif dist_escolhida == "Poisson":
+            lam_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=4.0, step=0.5, format="%.4f")
+            xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
+            dist = poisson(mu=lam_val)
+            nome_dist = f"Poisson(λ={lam_val:g})"
+            is_discrete = True
+            suporte_min, suporte_max = 0, xmax_val
 
-    elif dist_escolhida == "Geométrica":
-        p_val = col_p1.number_input("p (Sucesso):", min_value=0.0001, max_value=1.0, value=0.30, step=0.05, format="%.4f")
-        xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
-        dist = geom(p=p_val)
-        nome_dist = f"Geométrica(p={p_val:g})"
-        is_discrete = True
-        suporte_min, suporte_max = 1, max(1, xmax_val)
+        elif dist_escolhida == "Binomial Negativa":
+            r_val = col_p1.number_input("r (Sucessos):", min_value=1, value=5, step=1)
+            p_val = col_p2.number_input("p (Sucesso):", min_value=0.0001, max_value=1.0, value=0.30, step=0.05, format="%.4f")
+            xmax_val = st.number_input("x_max (Gráfico/Tabela):", min_value=1, value=25, step=1)
+            dist = nbinom(n=r_val, p=p_val)
+            nome_dist = f"Binomial Negativa(r={r_val}, p={p_val:g})"
+            is_discrete = True
+            suporte_min, suporte_max = 0, xmax_val
 
-    elif dist_escolhida == "Normal":
-        mu_val = col_p1.number_input("μ (Média):", value=0.0, step=0.5, format="%.4f")
-        sigma_val = col_p2.number_input("σ (Desvio Padrão):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
-        dist = norm(loc=mu_val, scale=sigma_val)
-        nome_dist = f"Normal(μ={mu_val:g}, σ={sigma_val:g})"
-        suporte_min, suporte_max = mu_val - 4 * sigma_val, mu_val + 4 * sigma_val
+        elif dist_escolhida == "Geométrica":
+            p_val = col_p1.number_input("p (Sucesso):", min_value=0.0001, max_value=1.0, value=0.30, step=0.05, format="%.4f")
+            xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
+            dist = geom(p=p_val)
+            nome_dist = f"Geométrica(p={p_val:g})"
+            is_discrete = True
+            suporte_min, suporte_max = 1, max(1, xmax_val)
 
-    elif dist_escolhida == "Uniforme Contínua":
-        a_u = col_p1.number_input("a (Mínimo):", value=0.0, step=0.5, format="%.4f")
-        b_u = col_p2.number_input("b (Máximo):", value=10.0, step=0.5, format="%.4f")
-        a_val, b_val = min(a_u, b_u), max(a_u, b_u)
-        if a_val == b_val:
-            b_val += 0.0001
-        dist = uniform(loc=a_val, scale=(b_val - a_val))
-        nome_dist = f"Uniforme(a={a_val:g}, b={b_val:g})"
-        suporte_finito = True
-        interv = b_val - a_val
-        suporte_min, suporte_max = a_val - 0.2 * interv, b_val + 0.2 * interv
+        elif dist_escolhida == "Normal":
+            mu_val = col_p1.number_input("μ (Média):", value=0.0, step=0.5, format="%.4f")
+            sigma_val = col_p2.number_input("σ (Desvio Padrão):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
+            dist = norm(loc=mu_val, scale=sigma_val)
+            nome_dist = f"Normal(μ={mu_val:g}, σ={sigma_val:g})"
+            suporte_min, suporte_max = mu_val - 4 * sigma_val, mu_val + 4 * sigma_val
 
-    elif dist_escolhida == "Exponencial":
-        taxa_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
-        dist = expon(scale=1.0 / taxa_val)
-        nome_dist = f"Exponencial(λ={taxa_val:g})"
-        suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+        elif dist_escolhida == "Uniforme Contínua":
+            a_u = col_p1.number_input("a (Mínimo):", value=0.0, step=0.5, format="%.4f")
+            b_u = col_p2.number_input("b (Máximo):", value=10.0, step=0.5, format="%.4f")
+            a_val, b_val = min(a_u, b_u), max(a_u, b_u)
+            if a_val == b_val:
+                b_val += 0.0001
+            dist = uniform(loc=a_val, scale=(b_val - a_val))
+            nome_dist = f"Uniforme(a={a_val:g}, b={b_val:g})"
+            suporte_finito = True
+            interv = b_val - a_val
+            suporte_min, suporte_max = a_val - 0.2 * interv, b_val + 0.2 * interv
 
-    elif dist_escolhida == "Gama":
-        a_g = col_p1.number_input("α (Forma):", min_value=0.0001, value=2.0, step=0.5, format="%.4f")
-        b_g = col_p2.number_input("β (Escala):", min_value=0.0001, value=2.0, step=0.2, format="%.4f")
-        dist = gamma_dist(a=a_g, scale=b_g)
-        nome_dist = f"Gama(α={a_g:g}, β={b_g:g})"
-        suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+        elif dist_escolhida == "Exponencial":
+            taxa_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
+            dist = expon(scale=1.0 / taxa_val)
+            nome_dist = f"Exponencial(λ={taxa_val:g})"
+            suporte_min, suporte_max = 0.0, dist.ppf(0.995)
 
-    elif dist_escolhida == "Beta":
-        a_b = col_p1.number_input("α (Forma 1):", min_value=0.0001, value=6.0, step=0.5, format="%.4f")
-        b_b = col_p2.number_input("β (Forma 2):", min_value=0.0001, value=9.0, step=0.5, format="%.4f")
-        dist = beta_dist(a=a_b, b=b_b)
-        nome_dist = f"Beta(α={a_b:g}, β={b_b:g})"
-        suporte_finito = True
-        suporte_min, suporte_max = 0.0, 1.0
+        elif dist_escolhida == "Gama":
+            a_g = col_p1.number_input("α (Forma):", min_value=0.0001, value=2.0, step=0.5, format="%.4f")
+            b_g = col_p2.number_input("β (Escala):", min_value=0.0001, value=2.0, step=0.2, format="%.4f")
+            dist = gamma_dist(a=a_g, scale=b_g)
+            nome_dist = f"Gama(α={a_g:g}, β={b_g:g})"
+            suporte_min, suporte_max = 0.0, dist.ppf(0.995)
 
-    elif dist_escolhida == "Qui-quadrado":
-        gl_q = col_p1.number_input("gl (ν):", min_value=0.0001, value=5.0, step=1.0, format="%.4f")
-        dist = chi2(df=gl_q)
-        nome_dist = f"Qui-quadrado(ν={gl_q:g})"
-        suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+        elif dist_escolhida == "Beta":
+            a_b = col_p1.number_input("α (Forma 1):", min_value=0.0001, value=6.0, step=0.5, format="%.4f")
+            b_b = col_p2.number_input("β (Forma 2):", min_value=0.0001, value=9.0, step=0.5, format="%.4f")
+            dist = beta_dist(a=a_b, b=b_b)
+            nome_dist = f"Beta(α={a_b:g}, β={b_b:g})"
+            suporte_finito = True
+            suporte_min, suporte_max = 0.0, 1.0
 
-    elif dist_escolhida == "t-Student":
-        gl_t = col_p1.number_input("gl (ν):", min_value=0.0001, value=10.0, step=1.0, format="%.4f")
-        dist = t_student(df=gl_t)
-        nome_dist = f"t-Student(ν={gl_t:g})"
-        suporte_min, suporte_max = dist.ppf(0.001), dist.ppf(0.999)
+        elif dist_escolhida == "Qui-quadrado":
+            gl_q = col_p1.number_input("gl (ν):", min_value=0.0001, value=5.0, step=1.0, format="%.4f")
+            dist = chi2(df=gl_q)
+            nome_dist = f"Qui-quadrado(ν={gl_q:g})"
+            suporte_min, suporte_max = 0.0, dist.ppf(0.995)
 
-    elif dist_escolhida == "F":
-        d1 = col_p1.number_input("gl1 (d1):", min_value=0.0001, value=5.0, step=1.0, format="%.4f")
-        d2 = col_p2.number_input("gl2 (d2):", min_value=0.0001, value=10.0, step=1.0, format="%.4f")
-        dist = f_fisher(dfn=d1, dfd=d2)
-        nome_dist = f"F(d1={d1:g}, d2={d2:g})"
-        suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+        elif dist_escolhida == "t-Student":
+            gl_t = col_p1.number_input("gl (ν):", min_value=0.0001, value=10.0, step=1.0, format="%.4f")
+            dist = t_student(df=gl_t)
+            nome_dist = f"t-Student(ν={gl_t:g})"
+            suporte_min, suporte_max = dist.ppf(0.001), dist.ppf(0.999)
 
-    elif dist_escolhida == "Cauchy":
-        loc_c = col_p1.number_input("x0 (Localização):", value=0.0, step=0.5, format="%.4f")
-        sc_c = col_p2.number_input("γ (Escala):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
-        dist = cauchy(loc=loc_c, scale=sc_c)
-        nome_dist = f"Cauchy(x0={loc_c:g}, γ={sc_c:g})"
-        suporte_min, suporte_max = loc_c - 6 * sc_c, loc_c + 6 * sc_c
+        elif dist_escolhida == "F":
+            d1 = col_p1.number_input("gl1 (d1):", min_value=0.0001, value=5.0, step=1.0, format="%.4f")
+            d2 = col_p2.number_input("gl2 (d2):", min_value=0.0001, value=10.0, step=1.0, format="%.4f")
+            dist = f_fisher(dfn=d1, dfd=d2)
+            nome_dist = f"F(d1={d1:g}, d2={d2:g})"
+            suporte_min, suporte_max = 0.0, dist.ppf(0.995)
 
-    cx1, cx2, ccas, cnot = st.columns([1, 1, 1, 1])
-    x1_exp = cx1.number_input("Valor x1:", value=0.25 if dist_escolhida == "Beta" else 3.0, step=0.1, format="%.4f", key="exp_x1")
-    x2_exp = cx2.number_input("Valor x2:", value=0.62 if dist_escolhida == "Beta" else 7.0, step=0.1, format="%.4f", key="exp_x2")
-    casas_exp = ccas.number_input("Casas decimais:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
-    notacao_exp = cnot.checkbox("Notação científica", value=False)
+        elif dist_escolhida == "Cauchy":
+            loc_c = col_p1.number_input("x0 (Localização):", value=0.0, step=0.5, format="%.4f")
+            sc_c = col_p2.number_input("γ (Escala):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
+            dist = cauchy(loc=loc_c, scale=sc_c)
+            nome_dist = f"Cauchy(x0={loc_c:g}, γ={sc_c:g})"
+            suporte_min, suporte_max = loc_c - 6 * sc_c, loc_c + 6 * sc_c
+
+        cx1, cx2, ccas, cnot = st.columns([1, 1, 1, 1])
+        x1_exp = cx1.number_input("Valor x1:", value=0.25 if dist_escolhida == "Beta" else 3.0, step=0.1, format="%.4f", key="exp_x1")
+        x2_exp = cx2.number_input("Valor x2:", value=0.62 if dist_escolhida == "Beta" else 7.0, step=0.1, format="%.4f", key="exp_x2")
+        casas_exp = ccas.number_input("Casas decimais:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
+        notacao_exp = cnot.checkbox("Notação científica", value=False)
+
+        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     a_exp, b_exp = sorted((x1_exp, x2_exp))
     formato_exp = f"{{:.{casas_exp}e}}" if notacao_exp else f"{{:.{casas_exp}f}}"
