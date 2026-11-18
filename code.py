@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from datetime import datetime
 from scipy.stats import (
     binom, poisson, nbinom, norm, expon, gamma as gamma_dist,
     beta as beta_dist, cauchy, uniform, geom, chi2,
@@ -10,13 +11,38 @@ from scipy.stats import (
 from scipy.special import gamma as gamma_func, beta as beta_func
 
 # ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA E ESTADO DA SESSÃO (HISTÓRICO)
 # ==============================================================================
 st.set_page_config(
     page_title="BayesLab - Estatística Bayesiana e Clássica",
     page_icon="📊",
     layout="wide"
 )
+
+if "historico_calculos" not in st.session_state:
+    st.session_state["historico_calculos"] = []
+if "contador_historico" not in st.session_state:
+    st.session_state["contador_historico"] = 0
+
+
+def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, detalhes_extras=""):
+    """Salva um cálculo realizado no histórico da sessão."""
+    st.session_state["contador_historico"] += 1
+    novo_id = st.session_state["contador_historico"]
+    agora = datetime.now().strftime("%H:%M:%S")
+
+    item = {
+        "id": novo_id,
+        "hora": agora,
+        "aba": aba,
+        "parametros": resumo_params,
+        "resultado": resumo_resultado,
+        "detalhes": detalhes_extras,
+        "tabela": df_tabela.copy() if df_tabela is not None else None
+    }
+    st.session_state["historico_calculos"].append(item)
+    st.toast(f"✅ Cálculo #{novo_id} ({aba}) salvo no Histórico!")
+
 
 st.title("📊 Suíte de Estatística Bayesiana & Distribuições")
 
@@ -83,7 +109,6 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
 
         mascara = (x_vals >= a) & (x_vals <= b)
 
-        # Intervalo da Priori exatamente em cima do da Posteriori
         ax.fill_between(
             x_vals, priori_pdf, where=mascara, color='#3498db', alpha=0.18,
             label=f'Priori P({a:g} < {simbolo_param} < {b:g}) = {fmt.format(p_pri_interv)}'
@@ -105,10 +130,18 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
         st.pyplot(fig)
         plt.close(fig)
 
+    resumo_res = (
+        f"Posteriori: {nome_post} | "
+        f"P({a:g} < {simbolo_param} < {b:g}) = {fmt.format(p_pos_interv)} | "
+        f"E[{simbolo_param}] = {fmt.format(dist_post.mean())}"
+    )
+    return df_res, resumo_res
+
 
 # ==============================================================================
 # ABAS PRINCIPAIS DO APLICATIVO
 # ==============================================================================
+qtd_hist = len(st.session_state["historico_calculos"])
 abas_principais = st.tabs([
     "1. Teorema de Bayes",
     "2. Beta-Binomial",
@@ -116,17 +149,33 @@ abas_principais = st.tabs([
     "4. Beta-Bin. Negativa",
     "5. Gama-Poisson",
     "6. Gama-Exponencial",
-    "7. Explorador de Distribuições"
+    "7. Explorador de Distribuições",
+    f"8. 📜 Histórico ({qtd_hist})"
 ])
 
 # ==============================================================================
-# ABA 1: TEOREMA DE BAYES DISCRETO
+# ABA 1: TEOREMA DE BAYES DISCRETO (COM RAMIFICAÇÕES NA VEROSSIMILHANÇA)
 # ==============================================================================
 with abas_principais[0]:
     st.subheader("Teorema de Bayes - Atualização de Probabilidades (Discreto)")
 
-    # Fora do form para atualizar a quantidade de linhas imediatamente
-    num_estados = st.number_input("Nº Opções (Hipóteses):", min_value=2, max_value=10, value=2, step=1)
+    # Controles estruturais fora do form para atualização imediata dos campos
+    cfg1, cfg2, cfg3 = st.columns([1.1, 2.2, 1.2])
+    num_estados = cfg1.number_input("Nº Opções (Hipóteses):", min_value=2, max_value=10, value=2, step=1)
+    modo_veros = cfg2.selectbox(
+        "Estrutura da Verossimilhança (Diagrama de Árvore):",
+        [
+            "Direta — Valor único P(B | Ai)",
+            "Sub-ramificações Paralelas — Soma: ∑ P(Sub | Ai) · P(B | Ai, Sub)",
+            "Etapas em Série — Produto: ∏ P(Etapa | Ai)"
+        ]
+    )
+    if modo_veros != "Direta — Valor único P(B | Ai)":
+        num_subramos = cfg3.number_input(
+            "Nº Sub-ramos / Etapas:", min_value=2, max_value=6, value=2, step=1
+        )
+    else:
+        num_subramos = 1
 
     with st.form("form_bayes_discreto"):
         c2, c3, c4, c5 = st.columns([1.5, 1.5, 1.2, 1])
@@ -143,38 +192,126 @@ with abas_principais[0]:
         estados_raw = []
 
         for i in range(num_estados):
-            col_n, col_p, col_v = st.columns([1.5, 1.5, 1.5])
             padrao_p = 0.80 if i == 0 else (0.20 if i == 1 else 0.0)
             padrao_c = 0.05 if i == 0 else (0.50 if i == 1 else 0.0)
 
-            nome_input = col_n.text_input(
-                f"{t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
-            )
-            priori_val = col_p.number_input(
-                f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
-                step=0.01, format="%.4f", key=f"disc_p_{i}"
-            )
-            veros_val = col_v.number_input(
-                f"P({ev} | {s_a}{i+1}) [Verossim.]:", min_value=0.0, max_value=1.0, value=padrao_c,
-                step=0.01, format="%.4f", key=f"disc_v_{i}"
-            )
-            estados_raw.append((nome_input, priori_val, veros_val))
+            if modo_veros == "Direta — Valor único P(B | Ai)":
+                col_n, col_p, col_v = st.columns([1.5, 1.5, 1.5])
+                nome_input = col_n.text_input(
+                    f"{t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
+                )
+                priori_val = col_p.number_input(
+                    f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
+                    step=0.01, format="%.4f", key=f"disc_p_{i}"
+                )
+                veros_val = col_v.number_input(
+                    f"P({ev} | {s_a}{i+1}) [Verossim.]:", min_value=0.0, max_value=1.0, value=padrao_c,
+                    step=0.01, format="%.4f", key=f"disc_v_{i}"
+                )
+                estados_raw.append({
+                    "nome_input": nome_input,
+                    "priori": priori_val,
+                    "veros_direta": veros_val,
+                    "subramos": []
+                })
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+            elif modo_veros.startswith("Sub-ramificações Paralelas"):
+                st.markdown(f"**{t_a} #{i+1} ({s_a}{i+1})**")
+                col_n, col_p = st.columns([1.5, 1.5])
+                nome_input = col_n.text_input(
+                    f"Nome da {t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
+                )
+                priori_val = col_p.number_input(
+                    f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
+                    step=0.01, format="%.4f", key=f"disc_p_{i}"
+                )
+
+                subramos_i = []
+                for j in range(num_subramos):
+                    cs_nome, cs_prob, cs_ver = st.columns([1.4, 1.5, 1.5])
+                    padrao_sub_p = round(1.0 / num_subramos, 4) if j < num_subramos - 1 else round(1.0 - round(1.0 / num_subramos, 4) * (num_subramos - 1), 4)
+                    padrao_sub_v = min(1.0, round(padrao_c * (0.8 + 0.4 * j), 4))
+
+                    sub_nome = cs_nome.text_input(
+                        f"↳ Sub-ramo #{j+1} de {s_a}{i+1}:",
+                        value="", placeholder=f"C{i+1}.{j+1}", key=f"sub_n_{i}_{j}"
+                    )
+                    sub_p = cs_prob.number_input(
+                        f"P(C{i+1}.{j+1} | {s_a}{i+1}):",
+                        min_value=0.0, max_value=1.0, value=float(padrao_sub_p),
+                        step=0.01, format="%.4f", key=f"sub_p_{i}_{j}"
+                    )
+                    sub_v = cs_ver.number_input(
+                        f"P({ev} | {s_a}{i+1} ∩ C{i+1}.{j+1}):",
+                        min_value=0.0, max_value=1.0, value=float(padrao_sub_v),
+                        step=0.01, format="%.4f", key=f"sub_v_{i}_{j}"
+                    )
+                    subramos_i.append({
+                        "nome": sub_nome.strip() if sub_nome.strip() else f"C{i+1}.{j+1}",
+                        "p_sub": sub_p,
+                        "p_ev_sub": sub_v
+                    })
+                st.markdown("---")
+                estados_raw.append({
+                    "nome_input": nome_input,
+                    "priori": priori_val,
+                    "veros_direta": sum(s["p_sub"] * s["p_ev_sub"] for s in subramos_i),
+                    "subramos": subramos_i
+                })
+
+            else:  # Etapas em Série (Produto)
+                st.markdown(f"**{t_a} #{i+1} ({s_a}{i+1})**")
+                col_n, col_p = st.columns([1.5, 1.5])
+                nome_input = col_n.text_input(
+                    f"Nome da {t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
+                )
+                priori_val = col_p.number_input(
+                    f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
+                    step=0.01, format="%.4f", key=f"disc_p_{i}"
+                )
+
+                cols_etapas = st.columns(num_subramos)
+                etapas_i = []
+                prod_v = 1.0
+                for j in range(num_subramos):
+                    padrao_et = round(padrao_c ** (1.0 / num_subramos), 4) if padrao_c > 0 else 0.5
+                    val_et = cols_etapas[j].number_input(
+                        f"↳ Etapa #{j+1} P(E{j+1} | {s_a}{i+1}):",
+                        min_value=0.0, max_value=1.0, value=float(padrao_et),
+                        step=0.01, format="%.4f", key=f"et_v_{i}_{j}"
+                    )
+                    prod_v *= val_et
+                    etapas_i.append({
+                        "nome": f"E{j+1}",
+                        "p_etapa": val_et
+                    })
+                st.markdown("---")
+                estados_raw.append({
+                    "nome_input": nome_input,
+                    "priori": priori_val,
+                    "veros_direta": prod_v,
+                    "subramos": etapas_i
+                })
+
+        sub_bayes = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     fmt_disc = f"{{:.{casas_disc}f}}"
     fmt_pct = f"{{:.{max(2, casas_disc - 2)}f}}%"
 
     estados_dict = {}
-    for i, (nome_input, priori_val, veros_val) in enumerate(estados_raw):
-        nome_val = nome_input.strip() if nome_input.strip() else f"{s_a}{i+1}"
+    for i, item in enumerate(estados_raw):
+        nome_val = item["nome_input"].strip() if item["nome_input"].strip() else f"{s_a}{i+1}"
         if nome_val in estados_dict:
             nome_val = f"{nome_val} ({i+1})"
-        estados_dict[nome_val] = [priori_val, veros_val]
+        estados_dict[nome_val] = {
+            "priori": item["priori"],
+            "veros": item["veros_direta"],
+            "subramos": item["subramos"]
+        }
 
     nomes_lista = list(estados_dict.keys())
-    soma_priors = sum(estados_dict[k][0] for k in nomes_lista)
-    p_ev = sum(estados_dict[k][0] * estados_dict[k][1] for k in nomes_lista)
+    soma_priors = sum(estados_dict[k]["priori"] for k in nomes_lista)
+    p_ev = sum(estados_dict[k]["priori"] * estados_dict[k]["veros"] for k in nomes_lista)
 
     st.divider()
     col_sel, col_res1, col_res2 = st.columns([1.2, 1.4, 1.4])
@@ -183,10 +320,20 @@ with abas_principais[0]:
     if not np.isclose(soma_priors, 1.0, atol=0.01):
         st.warning(f"⚠️ Atenção: A soma das probabilidades a priori é **{fmt_disc.format(soma_priors)}** (deveria ser 1.0).")
 
+    if modo_veros.startswith("Sub-ramificações Paralelas"):
+        for nome in nomes_lista:
+            soma_sub = sum(s["p_sub"] for s in estados_dict[nome]["subramos"])
+            if not np.isclose(soma_sub, 1.0, atol=0.01):
+                st.warning(
+                    f"⚠️ Atenção: A soma das probabilidades dos sub-ramos de **{nome}** é "
+                    f"**{fmt_disc.format(soma_sub)}** (caso sejam exaustivos, deveria ser 1.0)."
+                )
+
     if p_ev == 0:
         st.error(f"❌ Erro: A probabilidade total do evento P({ev}) é 0.")
     else:
-        priori_alvo, veros_alvo = estados_dict[alvo]
+        priori_alvo = estados_dict[alvo]["priori"]
+        veros_alvo = estados_dict[alvo]["veros"]
         posteriori_alvo = (priori_alvo * veros_alvo) / p_ev
 
         col_res1.metric(
@@ -205,7 +352,8 @@ with abas_principais[0]:
         posteriors_lista = []
 
         for nome in nomes_lista:
-            pri, ver = estados_dict[nome]
+            pri = estados_dict[nome]["priori"]
+            ver = estados_dict[nome]["veros"]
             conj = pri * ver
             post = conj / p_ev
             priors_lista.append(pri)
@@ -219,12 +367,57 @@ with abas_principais[0]:
             ])
         tabela_dados.append(["TOTAL", fmt_disc.format(soma_priors), "-", fmt_disc.format(p_ev), "1.0000 (100%)"])
 
+        df_disc = pd.DataFrame(
+            tabela_dados,
+            columns=[t_a, f"P({t_a}) [Priori]", f"P({ev} | {t_a}) [Verossim.]", "Conjunta", f"P({t_a} | {ev}) [Posteriori]"]
+        )
+
         with sub_disc[0]:
-            df_disc = pd.DataFrame(
-                tabela_dados,
-                columns=[t_a, f"P({t_a}) [Priori]", f"P({ev} | {t_a}) [Verossim.]", "Conjunta", f"P({t_a} | {ev}) [Posteriori]"]
-            )
             st.table(df_disc.set_index(t_a))
+
+            if modo_veros.startswith("Sub-ramificações Paralelas"):
+                st.markdown("##### 🌿 Detalhamento por Sub-ramificação")
+                linhas_sub = []
+                for nome in nomes_lista:
+                    pri = estados_dict[nome]["priori"]
+                    for s in estados_dict[nome]["subramos"]:
+                        conj_sub = pri * s["p_sub"] * s["p_ev_sub"]
+                        post_sub = conj_sub / p_ev
+                        linhas_sub.append([
+                            nome,
+                            s["nome"],
+                            fmt_disc.format(pri),
+                            fmt_disc.format(s["p_sub"]),
+                            fmt_disc.format(s["p_ev_sub"]),
+                            fmt_disc.format(s["p_sub"] * s["p_ev_sub"]),
+                            fmt_disc.format(conj_sub),
+                            f"{fmt_disc.format(post_sub)} ({fmt_pct.format(post_sub*100)})"
+                        ])
+                df_sub = pd.DataFrame(
+                    linhas_sub,
+                    columns=[
+                        t_a, "Sub-ramo (C)", f"P({t_a})", f"P(C | {t_a})",
+                        f"P({ev} | {t_a} ∩ C)", f"Parcela em P({ev} | {t_a})",
+                        f"Conjunta P({t_a} ∩ C ∩ {ev})", f"Posteriori P({t_a} ∩ C | {ev})"
+                    ]
+                )
+                st.dataframe(df_sub, use_container_width=True, hide_index=True)
+
+            elif modo_veros.startswith("Etapas em Série"):
+                st.markdown("##### 🔗 Detalhamento das Etapas em Série na Verossimilhança")
+                linhas_et = []
+                for nome in nomes_lista:
+                    etapas_str = " × ".join(f"{s['p_etapa']:.4g}" for s in estados_dict[nome]["subramos"])
+                    linhas_et.append([
+                        nome,
+                        etapas_str,
+                        fmt_disc.format(estados_dict[nome]["veros"])
+                    ])
+                df_et = pd.DataFrame(
+                    linhas_et,
+                    columns=[t_a, "Produto das Etapas", f"P({ev} | {t_a}) Resultante"]
+                )
+                st.table(df_et.set_index(t_a))
 
         with sub_disc[1]:
             fig_bar, ax_bar = plt.subplots(figsize=(8, 4.2))
@@ -248,39 +441,152 @@ with abas_principais[0]:
             plt.close(fig_bar)
 
         with sub_disc[2]:
-            fig_tree, ax_tree = plt.subplots(figsize=(11, max(4.5, num_estados * 1.6)))
-            ax_tree.axis('off')
-            ax_tree.text(0, 0.5, 'Início', ha='center', va='center', bbox=dict(boxstyle='round,pad=0.5', fc='white', ec='gray'))
+            if modo_veros.startswith("Sub-ramificações Paralelas"):
+                # Diagrama de Árvore de 3 níveis (Início -> Ai -> Sub-ramo C -> Evento B / Não B)
+                total_sub_ativos = sum(len(estados_dict[n]["subramos"]) for n in nomes_lista)
+                fig_tree, ax_tree = plt.subplots(figsize=(13.5, max(5.5, total_sub_ativos * 1.45)))
+                ax_tree.axis('off')
+                ax_tree.text(0, 0.5, 'Início', ha='center', va='center', bbox=dict(boxstyle='round,pad=0.5', fc='white', ec='gray'))
 
-            y_step = 1.0 / (num_estados + 1)
-            for i, nome in enumerate(nomes_lista):
-                y_a = 1.0 - (i + 1) * y_step
-                pri, ver = estados_dict[nome]
-                prob_nao_ev = 1.0 - ver
+                y_step_c = 1.0 / (total_sub_ativos + 1)
+                idx_c_global = 0
 
-                ax_tree.plot([0.1, 0.9], [0.5, y_a], 'k-', lw=1.5)
-                ax_tree.text(0.5, (0.5 + y_a)/2 + 0.02, f"P({nome})={pri:.4g}", ha='center', va='bottom', fontsize=9.5, color='darkblue')
-                ax_tree.text(1.0, y_a, nome, ha='center', va='center', bbox=dict(boxstyle='round,pad=0.5', fc='lightblue', ec='blue'))
+                for nome in nomes_lista:
+                    pri = estados_dict[nome]["priori"]
+                    subs = estados_dict[nome]["subramos"]
+                    ys_deste_a = []
 
-                y_up = y_a + y_step / 3.5
-                y_down = y_a - y_step / 3.5
+                    for s in subs:
+                        idx_c_global += 1
+                        y_c = 1.0 - idx_c_global * y_step_c
+                        ys_deste_a.append((y_c, s))
 
-                ax_tree.plot([1.1, 2.3], [y_a, y_up], 'k-', lw=1.5)
-                ax_tree.text(1.7, (y_a + y_up)/2 + 0.02, f"P({ev}|{nome})={ver:.4g}", ha='center', va='bottom', fontsize=9, color='green')
-                ax_tree.text(2.4, y_up, ev, ha='center', va='center', bbox=dict(boxstyle='round,pad=0.4', fc='lightgreen', ec='green'))
-                ax_tree.text(2.65, y_up, f"∩ = {fmt_disc.format(pri * ver)}", ha='left', va='center', fontsize=9.5, fontweight='bold')
+                    y_a = np.mean([ par[0] for par in ys_deste_a ])
 
-                ax_tree.plot([1.1, 2.3], [y_a, y_down], 'k--', lw=1.5, alpha=0.6)
-                ax_tree.text(1.7, (y_a + y_down)/2 - 0.02, f"P(Não {ev}|{nome})={prob_nao_ev:.4g}", ha='center', va='top', fontsize=9, color='red')
-                ax_tree.text(2.4, y_down, f"Não {ev}", ha='center', va='center', bbox=dict(boxstyle='round,pad=0.4', fc='#ffcccc', ec='red'))
-                ax_tree.text(2.65, y_down, f"∩ = {fmt_disc.format(pri * prob_nao_ev)}", ha='left', va='center', fontsize=9.5, alpha=0.6)
+                    # Ramo Nível 1: Início -> Ai
+                    ax_tree.plot([0.08, 0.88], [0.5, y_a], 'k-', lw=1.6)
+                    ax_tree.text(
+                        0.48, (0.5 + y_a)/2 + 0.015, f"P({nome})={pri:.4g}",
+                        ha='center', va='bottom', fontsize=9, color='darkblue'
+                    )
+                    ax_tree.text(
+                        1.0, y_a, nome, ha='center', va='center',
+                        bbox=dict(boxstyle='round,pad=0.45', fc='lightblue', ec='blue')
+                    )
 
-            ax_tree.set_xlim(-0.2, 3.5)
-            ax_tree.set_ylim(0, 1)
-            ax_tree.set_title(f'Diagrama de Árvore: Probabilidade Total P({ev})', fontsize=13, pad=15)
-            fig_tree.tight_layout()
-            st.pyplot(fig_tree)
-            plt.close(fig_tree)
+                    # Ramos Nível 2 e 3: Ai -> C -> Ev / Não Ev
+                    for y_c, s in ys_deste_a:
+                        p_sub = s["p_sub"]
+                        p_ev_sub = s["p_ev_sub"]
+                        p_nao_ev_sub = 1.0 - p_ev_sub
+                        nome_c = s["nome"]
+
+                        ax_tree.plot([1.12, 2.05], [y_a, y_c], 'k-', lw=1.3)
+                        ax_tree.text(
+                            1.58, (y_a + y_c)/2 + 0.012, f"P({nome_c}|{nome})={p_sub:.4g}",
+                            ha='center', va='bottom', fontsize=8.5, color='#5b2c6f'
+                        )
+                        ax_tree.text(
+                            2.2, y_c, nome_c, ha='center', va='center',
+                            bbox=dict(boxstyle='round,pad=0.38', fc='#ebdef0', ec='#8e44ad')
+                        )
+
+                        y_up = y_c + y_step_c / 3.3
+                        y_down = y_c - y_step_c / 3.3
+
+                        # Sub-ramo para Evento B
+                        ax_tree.plot([2.34, 3.35], [y_c, y_up], 'k-', lw=1.3)
+                        ax_tree.text(
+                            2.85, (y_c + y_up)/2 + 0.01, f"P({ev}|{nome},{nome_c})={p_ev_sub:.4g}",
+                            ha='center', va='bottom', fontsize=8, color='green'
+                        )
+                        ax_tree.text(
+                            3.5, y_up, ev, ha='center', va='center',
+                            bbox=dict(boxstyle='round,pad=0.32', fc='lightgreen', ec='green')
+                        )
+                        ax_tree.text(
+                            3.72, y_up, f"∩ = {fmt_disc.format(pri * p_sub * p_ev_sub)}",
+                            ha='left', va='center', fontsize=8.8, fontweight='bold'
+                        )
+
+                        # Sub-ramo para Não Evento B
+                        ax_tree.plot([2.34, 3.35], [y_c, y_down], 'k--', lw=1.1, alpha=0.55)
+                        ax_tree.text(
+                            2.85, (y_c + y_down)/2 - 0.01, f"1-P={p_nao_ev_sub:.4g}",
+                            ha='center', va='top', fontsize=8, color='red'
+                        )
+                        ax_tree.text(
+                            3.5, y_down, f"Não {ev}", ha='center', va='center',
+                            bbox=dict(boxstyle='round,pad=0.32', fc='#ffcccc', ec='red')
+                        )
+                        ax_tree.text(
+                            3.72, y_down, f"∩ = {fmt_disc.format(pri * p_sub * p_nao_ev_sub)}",
+                            ha='left', va='center', fontsize=8.5, alpha=0.6
+                        )
+
+                ax_tree.set_xlim(-0.2, 4.55)
+                ax_tree.set_ylim(0, 1)
+                ax_tree.set_title(f'Diagrama de Árvore com Sub-ramificações: P({ev})', fontsize=13, pad=15)
+                fig_tree.tight_layout()
+                st.pyplot(fig_tree)
+                plt.close(fig_tree)
+
+            else:
+                # Diagrama de Árvore Padrão ou com Etapas em Série anotadas no ramo da verossimilhança
+                fig_tree, ax_tree = plt.subplots(figsize=(11.5, max(4.5, num_estados * 1.65)))
+                ax_tree.axis('off')
+                ax_tree.text(0, 0.5, 'Início', ha='center', va='center', bbox=dict(boxstyle='round,pad=0.5', fc='white', ec='gray'))
+
+                y_step = 1.0 / (num_estados + 1)
+                for i, nome in enumerate(nomes_lista):
+                    y_a = 1.0 - (i + 1) * y_step
+                    pri = estados_dict[nome]["priori"]
+                    ver = estados_dict[nome]["veros"]
+                    prob_nao_ev = 1.0 - ver
+
+                    ax_tree.plot([0.1, 0.9], [0.5, y_a], 'k-', lw=1.5)
+                    ax_tree.text(0.5, (0.5 + y_a)/2 + 0.02, f"P({nome})={pri:.4g}", ha='center', va='bottom', fontsize=9.5, color='darkblue')
+                    ax_tree.text(1.0, y_a, nome, ha='center', va='center', bbox=dict(boxstyle='round,pad=0.5', fc='lightblue', ec='blue'))
+
+                    y_up = y_a + y_step / 3.5
+                    y_down = y_a - y_step / 3.5
+
+                    if modo_veros.startswith("Etapas em Série"):
+                        prod_txt = "×".join(f"{s['p_etapa']:.3g}" for s in estados_dict[nome]["subramos"])
+                        lbl_ver = f"P({ev}|{nome}) = {prod_txt} = {ver:.4g}"
+                    else:
+                        lbl_ver = f"P({ev}|{nome})={ver:.4g}"
+
+                    ax_tree.plot([1.1, 2.3], [y_a, y_up], 'k-', lw=1.5)
+                    ax_tree.text(1.7, (y_a + y_up)/2 + 0.02, lbl_ver, ha='center', va='bottom', fontsize=8.8, color='green')
+                    ax_tree.text(2.4, y_up, ev, ha='center', va='center', bbox=dict(boxstyle='round,pad=0.4', fc='lightgreen', ec='green'))
+                    ax_tree.text(2.65, y_up, f"∩ = {fmt_disc.format(pri * ver)}", ha='left', va='center', fontsize=9.5, fontweight='bold')
+
+                    ax_tree.plot([1.1, 2.3], [y_a, y_down], 'k--', lw=1.5, alpha=0.6)
+                    ax_tree.text(1.7, (y_a + y_down)/2 - 0.02, f"P(Não {ev}|{nome})={prob_nao_ev:.4g}", ha='center', va='top', fontsize=9, color='red')
+                    ax_tree.text(2.4, y_down, f"Não {ev}", ha='center', va='center', bbox=dict(boxstyle='round,pad=0.4', fc='#ffcccc', ec='red'))
+                    ax_tree.text(2.65, y_down, f"∩ = {fmt_disc.format(pri * prob_nao_ev)}", ha='left', va='center', fontsize=9.5, alpha=0.6)
+
+                ax_tree.set_xlim(-0.2, 3.5)
+                ax_tree.set_ylim(0, 1)
+                ax_tree.set_title(f'Diagrama de Árvore: Probabilidade Total P({ev})', fontsize=13, pad=15)
+                fig_tree.tight_layout()
+                st.pyplot(fig_tree)
+                plt.close(fig_tree)
+
+        if sub_bayes:
+            resumo_p = (
+                f"Evento: {ev} | Modo: {modo_veros.split('—')[0].strip()} | "
+                + ", ".join(f"{n}: Pri={estados_dict[n]['priori']:.4g}, Ver={estados_dict[n]['veros']:.4g}" for n in nomes_lista)
+            )
+            resumo_r = (
+                f"P({ev}) = {fmt_disc.format(p_ev)} | "
+                + ", ".join(
+                    f"P({n}|{ev}) = {fmt_disc.format((estados_dict[n]['priori']*estados_dict[n]['veros'])/p_ev)}"
+                    for n in nomes_lista
+                )
+            )
+            registrar_historico("1. Teorema de Bayes", resumo_p, resumo_r, df_disc)
 
 
 # ==============================================================================
@@ -300,7 +606,7 @@ with abas_principais[1]:
         bb_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.80, step=0.05, format="%.4f", key="bb_x2")
         bb_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bb_casas")
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+        sub_bb = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     if bb_k > bb_n:
         st.error("❌ Erro: O número de sucessos (k) não pode ser maior que o de ensaios (n).")
@@ -313,11 +619,17 @@ with abas_principais[1]:
         int_norm = beta_func(a_post, b_post) / beta_func(bb_a, bb_b)
         info = f"Sucessos: {bb_k} | Fracassos: {bb_n - bb_k} | Integral do Núcleo: {int_norm:.6e}"
 
-        exibir_relatorio_conjugado(
+        df_bb, res_bb = exibir_relatorio_conjugado(
             d_pri, d_pos, f"Beta({bb_a:g}; {bb_b:g})", f"Beta({a_post:g}; {b_post:g})",
             theta, bb_x1, bb_x2, bb_casas,
             "Atualização Bayesiana (Modelo Beta-Binomial)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info
         )
+        if sub_bb:
+            registrar_historico(
+                "2. Beta-Binomial",
+                f"Priori: Beta({bb_a:g}; {bb_b:g}) | n={bb_n}, k={bb_k} | Intervalo: [{bb_x1:g}, {bb_x2:g}]",
+                res_bb, df_bb, info
+            )
 
 
 # ==============================================================================
@@ -337,7 +649,7 @@ with abas_principais[2]:
         bg_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.62, step=0.05, format="%.4f", key="bg_x2")
         bg_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bg_casas")
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+        sub_bg = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     if bg_m > bg_n:
         st.error("❌ Erro: O número de sequências não pode ser maior que o total de ensaios (n).")
@@ -350,11 +662,17 @@ with abas_principais[2]:
         theta = np.linspace(0, 1, 500)
         info = f"Sucessos (sequências): {bg_m} | Fracassos (n - m): {fracassos}"
 
-        exibir_relatorio_conjugado(
+        df_bg, res_bg = exibir_relatorio_conjugado(
             d_pri, d_pos, f"Beta({bg_a:g}; {bg_b:g})", f"Beta({a_post:g}; {b_post:g})",
             theta, bg_x1, bg_x2, bg_casas,
             "Atualização Bayesiana (Modelo Beta-Geométrica)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info
         )
+        if sub_bg:
+            registrar_historico(
+                "3. Beta-Geométrica",
+                f"Priori: Beta({bg_a:g}; {bg_b:g}) | n={bg_n}, m={bg_m} | Intervalo: [{bg_x1:g}, {bg_x2:g}]",
+                res_bg, df_bg, info
+            )
 
 
 # ==============================================================================
@@ -374,7 +692,7 @@ with abas_principais[3]:
         bbn_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.75, step=0.05, format="%.4f", key="bbn_x2")
         bbn_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bbn_casas")
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+        sub_bbn = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     if bbn_r > bbn_n:
         st.error("❌ Erro: O número de sucessos fixados (r) não pode ser maior que o total de ensaios (n).")
@@ -387,11 +705,17 @@ with abas_principais[3]:
         theta = np.linspace(0, 1, 500)
         info = f"Sucessos fixos (r): {bbn_r} | Fracassos (n - r): {fracassos}"
 
-        exibir_relatorio_conjugado(
+        df_bbn, res_bbn = exibir_relatorio_conjugado(
             d_pri, d_pos, f"Beta({bbn_a:g}; {bbn_b:g})", f"Beta({a_post:g}; {b_post:g})",
             theta, bbn_x1, bbn_x2, bbn_casas,
             "Atualização Bayesiana (Modelo Beta-Binomial Negativa)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info
         )
+        if sub_bbn:
+            registrar_historico(
+                "4. Beta-Bin. Negativa",
+                f"Priori: Beta({bbn_a:g}; {bbn_b:g}) | n={bbn_n}, r={bbn_r} | Intervalo: [{bbn_x1:g}, {bbn_x2:g}]",
+                res_bbn, df_bbn, info
+            )
 
 
 # ==============================================================================
@@ -412,7 +736,7 @@ with abas_principais[4]:
         gp_x2 = c6.number_input("Limite x2:", value=3.70, step=0.1, format="%.4f", key="gp_x2")
         gp_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="gp_casas")
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+        sub_gp = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     a_post = gp_alpha + gp_soma
     if gp_param == "Escala (β)":
@@ -436,11 +760,17 @@ with abas_principais[4]:
     limite_sup = max(d_pri.ppf(0.995), d_pos.ppf(0.995), gp_x1 * 1.2, gp_x2 * 1.2, 0.1)
     lambda_vals = np.linspace(0, limite_sup, 500)
 
-    exibir_relatorio_conjugado(
+    df_gp, res_gp = exibir_relatorio_conjugado(
         d_pri, d_pos, f"Gama({gp_alpha:g}; {gp_beta:g})", f"Gama({a_post:g}; {b_post:.6f})",
         lambda_vals, gp_x1, gp_x2, gp_casas,
         "Atualização Bayesiana (Modelo Gama-Poisson)", r"$\lambda$ (Taxa de Ocorrência)", "λ", info
     )
+    if sub_gp:
+        registrar_historico(
+            "5. Gama-Poisson",
+            f"Priori: Gama({gp_alpha:g}; {gp_beta:g}) [{gp_param}] | n={gp_n}, Σx={gp_soma} | Intervalo: [{gp_x1:g}, {gp_x2:g}]",
+            res_gp, df_gp, info
+        )
 
 
 # ==============================================================================
@@ -461,7 +791,7 @@ with abas_principais[5]:
         ge_x2 = c6.number_input("Limite x2:", value=1.60, step=0.1, format="%.4f", key="ge_x2")
         ge_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="ge_casas")
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+        sub_ge = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     a_post = ge_alpha + ge_n
     if ge_param == "Escala (β)":
@@ -482,11 +812,17 @@ with abas_principais[5]:
     limite_sup = max(d_pri.ppf(0.995), d_pos.ppf(0.995), ge_x1 * 1.2, ge_x2 * 1.2, 0.1)
     lambda_vals = np.linspace(0, limite_sup, 500)
 
-    exibir_relatorio_conjugado(
+    df_ge, res_ge = exibir_relatorio_conjugado(
         d_pri, d_pos, f"Gama({ge_alpha:g}; {ge_beta:g})", f"Gama({a_post:g}; {b_post:.6f})",
         lambda_vals, ge_x1, ge_x2, ge_casas,
         "Atualização Bayesiana (Modelo Gama-Exponencial)", r"$\lambda$ (Taxa de Falha / Tempo)", "λ", info
     )
+    if sub_ge:
+        registrar_historico(
+            "6. Gama-Exponencial",
+            f"Priori: Gama({ge_alpha:g}; {ge_beta:g}) [{ge_param}] | n={ge_n}, Σx={ge_soma:g} | Intervalo: [{ge_x1:g}, {ge_x2:g}]",
+            res_ge, df_ge, info
+        )
 
 
 # ==============================================================================
@@ -495,7 +831,6 @@ with abas_principais[5]:
 with abas_principais[6]:
     st.subheader("Explorador de Distribuições de Probabilidade")
 
-    # Fora do form para trocar os campos da distribuição instantaneamente
     dist_escolhida = st.selectbox(
         "Selecione a Distribuição:",
         [
@@ -616,7 +951,7 @@ with abas_principais[6]:
         casas_exp = ccas.number_input("Casas decimais:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
         notacao_exp = cnot.checkbox("Notação científica", value=False)
 
-        st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+        sub_exp = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
     a_exp, b_exp = sorted((x1_exp, x2_exp))
     formato_exp = f"{{:.{casas_exp}e}}" if notacao_exp else f"{{:.{casas_exp}f}}"
@@ -662,6 +997,17 @@ with abas_principais[6]:
         df_exp = pd.DataFrame(linhas_exp, columns=["Medida", "Valor"])
         st.table(df_exp.set_index("Medida"))
 
+    if sub_exp:
+        res_exp_str = (
+            f"P({a_exp:g} <= X <= {b_exp:g}) = {formato_exp.format(prob_interv_exp)} | "
+            f"E[X] = {formato_exp.format(media_e) if not np.isnan(media_e) else 'Indefinida'}"
+        )
+        registrar_historico(
+            f"7. Explorador ({dist_escolhida})",
+            f"{nome_dist} | x1={x1_exp:g}, x2={x2_exp:g}",
+            res_exp_str, df_exp
+        )
+
     with col_graf_exp:
         st.markdown("##### 📈 Gráfico da Distribuição")
         fig_e, ax_e = plt.subplots(figsize=(8.5, 4.5))
@@ -697,3 +1043,69 @@ with abas_principais[6]:
                 ]
                 df_tab_disc = pd.DataFrame(tab_disc, columns=["x", "P(X = x)", "P(X <= x) [CDF]"])
                 st.dataframe(df_tab_disc, use_container_width=True, hide_index=True)
+
+
+# ==============================================================================
+# ABA 8: HISTÓRICO DA CALCULADORA
+# ==============================================================================
+with abas_principais[7]:
+    st.subheader("📜 Histórico de Cálculos da Sessão")
+    st.caption("Todos os cálculos confirmados no botão **'🔄 Calcular / Atualizar'** de qualquer aba ficam registrados aqui.")
+
+    hist = st.session_state["historico_calculos"]
+
+    if not hist:
+        st.info("Nenhum cálculo salvo ainda. Vá até qualquer uma das abas e clique em **'🔄 Calcular / Atualizar'** para registrar seus cálculos.")
+    else:
+        col_f1, col_f2, col_del_all = st.columns([1.8, 1.4, 1.2])
+
+        abas_disponiveis = ["Todas"] + sorted(list({item["aba"] for item in hist}))
+        filtro_aba = col_f1.selectbox("Filtrar por Modelo / Aba:", abas_disponiveis)
+        ordem_hist = col_f2.selectbox("Ordenação:", ["Mais recentes primeiro", "Mais antigos primeiro"])
+
+        col_del_all.write("")
+        col_del_all.write("")
+        if col_del_all.button("🗑️ Deletar Todo o Histórico", type="primary", use_container_width=True):
+            st.session_state["historico_calculos"] = []
+            st.rerun()
+
+        hist_filtrado = [
+            item for item in hist
+            if filtro_aba == "Todas" or item["aba"] == filtro_aba
+        ]
+        if ordem_hist == "Mais recentes primeiro":
+            hist_filtrado = list(reversed(hist_filtrado))
+
+        # Tabela-resumo rápida de todos os cálculos filtrados
+        with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico", expanded=True):
+            df_resumo_hist = pd.DataFrame([
+                {
+                    "#": item["id"],
+                    "Hora": item["hora"],
+                    "Aba / Modelo": item["aba"],
+                    "Parâmetros Utilizados": item["parametros"],
+                    "Resultado Principal": item["resultado"]
+                }
+                for item in hist_filtrado
+            ])
+            st.dataframe(df_resumo_hist, use_container_width=True, hide_index=True)
+
+        st.markdown("##### 🗂️ Detalhes de Cada Cálculo")
+        for idx, item in enumerate(hist_filtrado):
+            titulo_exp = f"#{item['id']} [{item['hora']}] — {item['aba']} | {item['resultado']}"
+            with st.expander(titulo_exp, expanded=(idx == 0)):
+                c_det, c_btn = st.columns([4.5, 1])
+                with c_det:
+                    st.markdown(f"**Parâmetros:** `{item['parametros']}`")
+                    st.markdown(f"**Resultado Principal:** `{item['resultado']}`")
+                    if item["detalhes"]:
+                        st.caption(f"ℹ️ {item['detalhes']}")
+                with c_btn:
+                    if st.button("❌ Excluir", key=f"del_item_{item['id']}", use_container_width=True):
+                        st.session_state["historico_calculos"] = [
+                            h for h in st.session_state["historico_calculos"] if h["id"] != item["id"]
+                        ]
+                        st.rerun()
+
+                if item["tabela"] is not None:
+                    st.table(item["tabela"].set_index(item["tabela"].columns[0]))
