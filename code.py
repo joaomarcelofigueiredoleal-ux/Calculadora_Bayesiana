@@ -1,10 +1,11 @@
 import re
+import uuid
 import streamlit as st
 import streamlit.components.v1 as components
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from scipy.stats import (
     binom, poisson, nbinom, norm, expon, gamma as gamma_dist,
     beta as beta_dist, cauchy, uniform, geom, chi2,
@@ -13,7 +14,7 @@ from scipy.stats import (
 from scipy.special import gamma as gamma_func, beta as beta_func
 
 # ==============================================================================
-# CONFIGURAÇÃO DA PÁGINA E ESTADO DA SESSÃO (HISTÓRICO)
+# CONFIGURAÇÃO DA PÁGINA, FUSO HORÁRIO (BH / UTC-3) E ESTADO DA SESSÃO
 # ==============================================================================
 st.set_page_config(
     page_title="BayesLab - Estatística Bayesiana e Clássica",
@@ -21,13 +22,25 @@ st.set_page_config(
     layout="wide"
 )
 
+FUSO_BR = timezone(timedelta(hours=-3))
+
 if "historico_calculos" not in st.session_state:
     st.session_state["historico_calculos"] = []
 if "contador_historico" not in st.session_state:
     st.session_state["contador_historico"] = 0
 
-# Migração retroativa para itens já existentes na sessão atual (preserva os cálculos já feitos)
+
+def renumerar_historico():
+    """Garante que os IDs (#) sejam sempre sequenciais (1, 2, 3...) e atualiza o contador."""
+    for idx, item in enumerate(st.session_state["historico_calculos"], start=1):
+        item["id"] = idx
+    st.session_state["contador_historico"] = len(st.session_state["historico_calculos"])
+
+
+# Migração retroativa para itens já existentes na sessão atual
 for _item in st.session_state["historico_calculos"]:
+    if "uid" not in _item:
+        _item["uid"] = uuid.uuid4().hex
     if "aba_base" not in _item or "rotulo" not in _item:
         _m = re.match(r"^(.*?)\s*\[(.*)\]$", str(_item.get("aba", "")))
         if _m:
@@ -36,6 +49,15 @@ for _item in st.session_state["historico_calculos"]:
         else:
             _item["aba_base"] = str(_item.get("aba", "")).strip()
             _item["rotulo"] = ""
+    if not _item.get("fuso_corrigido"):
+        try:
+            _dt = datetime.strptime(_item["hora"], "%H:%M:%S")
+            _item["hora"] = (_dt - timedelta(hours=3)).strftime("%H:%M:%S")
+        except Exception:
+            pass
+        _item["fuso_corrigido"] = True
+
+renumerar_historico()
 
 
 # ==============================================================================
@@ -130,16 +152,16 @@ def atualizar_rotulo_item(item, novo_rotulo):
     item["aba_base"] = aba_base
     item["rotulo"] = rot
     item["aba"] = f"{aba_base} [{rot}]" if rot else aba_base
-    key_input = f"edit_rot_{item['id']}"
+    key_input = f"edit_rot_{item['uid']}"
     if key_input in st.session_state:
         st.session_state[key_input] = rot
 
 
-def cb_renomear_item_card(item_id, key_input):
+def cb_renomear_item_card(item_uid, key_input):
     """Callback para renomear o rótulo a partir do campo dentro do card do histórico."""
     novo_rot = st.session_state.get(key_input, "")
     for h in st.session_state["historico_calculos"]:
-        if h["id"] == item_id:
+        if h["uid"] == item_uid:
             atualizar_rotulo_item(h, novo_rot)
             break
 
@@ -199,16 +221,17 @@ components.html(
 
 
 def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, detalhes_extras="", rotulo=""):
-    """Salva um cálculo realizado no histórico da sessão."""
-    st.session_state["contador_historico"] += 1
-    novo_id = st.session_state["contador_historico"]
-    agora = datetime.now().strftime("%H:%M:%S")
+    """Salva um cálculo realizado no histórico da sessão no fuso de Brasília (UTC-3)."""
+    novo_id = len(st.session_state["historico_calculos"]) + 1
+    agora = datetime.now(FUSO_BR).strftime("%H:%M:%S")
     rot_limpo = rotulo.strip() if rotulo else ""
     aba_exibicao = f"{aba} [{rot_limpo}]" if rot_limpo else aba
 
     item = {
+        "uid": uuid.uuid4().hex,
         "id": novo_id,
         "hora": agora,
+        "fuso_corrigido": True,
         "aba_base": aba,
         "rotulo": rot_limpo,
         "aba": aba_exibicao,
@@ -218,6 +241,7 @@ def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, de
         "tabela": df_tabela.copy() if df_tabela is not None else None
     }
     st.session_state["historico_calculos"].append(item)
+    renumerar_historico()
     st.toast(f"✅ Cálculo #{novo_id} ({aba_exibicao}) salvo no Histórico!")
 
 
@@ -235,7 +259,6 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
     """Exibe parâmetros, tabela comparativa completa (com MAP, Mediana e ICs) e gráfico."""
     fmt = f"{{:.{casas_dec}f}}"
 
-    # Define os limites ativos com base no modo escolhido (manual ou Intervalo de Credibilidade)
     if modo_intervalo == "IC 90% da Posteriori":
         a, b = dist_post.ppf(0.05), dist_post.ppf(0.95)
     elif modo_intervalo == "IC 95% da Posteriori":
@@ -247,27 +270,23 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
 
     x1_efetivo, x2_efetivo = a, b
 
-    # Probabilidades na Priori
     p_pri_menor_x1 = dist_priori.cdf(x1_efetivo)
     p_pri_maior_x1 = dist_priori.sf(x1_efetivo)
     p_pri_menor_x2 = dist_priori.cdf(x2_efetivo)
     p_pri_maior_x2 = dist_priori.sf(x2_efetivo)
     p_pri_interv   = dist_priori.cdf(b) - dist_priori.cdf(a)
 
-    # Probabilidades na Posteriori
     p_pos_menor_x1 = dist_post.cdf(x1_efetivo)
     p_pos_maior_x1 = dist_post.sf(x1_efetivo)
     p_pos_menor_x2 = dist_post.cdf(x2_efetivo)
     p_pos_maior_x2 = dist_post.sf(x2_efetivo)
     p_pos_interv   = dist_post.cdf(b) - dist_post.cdf(a)
 
-    # Moda (MAP) e Mediana
     moda_pri = calcular_moda_conjugada(tipo_dist, params_pri[0], params_pri[1])
     moda_pos = calcular_moda_conjugada(tipo_dist, params_pos[0], params_pos[1])
     str_moda_pri = fmt.format(moda_pri) if not np.isnan(moda_pri) else "Não única / Fronteira"
     str_moda_pos = fmt.format(moda_pos) if not np.isnan(moda_pos) else "Não única / Fronteira"
 
-    # Intervalos de Credibilidade Simétricos (Equal-Tailed)
     ic90_pri = f"[{fmt.format(dist_priori.ppf(0.05))}; {fmt.format(dist_priori.ppf(0.95))}]"
     ic90_pos = f"[{fmt.format(dist_post.ppf(0.05))}; {fmt.format(dist_post.ppf(0.95))}]"
     ic95_pri = f"[{fmt.format(dist_priori.ppf(0.025))}; {fmt.format(dist_priori.ppf(0.975))}]"
@@ -275,7 +294,6 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
     ic99_pri = f"[{fmt.format(dist_priori.ppf(0.005))}; {fmt.format(dist_priori.ppf(0.995))}]"
     ic99_pos = f"[{fmt.format(dist_post.ppf(0.005))}; {fmt.format(dist_post.ppf(0.995))}]"
 
-    # Resumo em destaque + Botão de Atualização Sequencial
     c1, c2, c3 = st.columns([1.4, 1.4, 1.1])
     c1.info(f"**Priori (Antes):** `{nome_priori}`")
     c2.error(f"**Posteriori (Depois):** `{nome_post}`")
@@ -291,7 +309,6 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
     if info_extra:
         st.caption(f"ℹ️ {info_extra}")
 
-    # Tabela comparativa
     dados_tabela = [
         [f"P({simbolo_param} < {x1_efetivo:.4g})", fmt.format(p_pri_menor_x1), fmt.format(p_pos_menor_x1)],
         [f"P({simbolo_param} > {x1_efetivo:.4g})", fmt.format(p_pri_maior_x1), fmt.format(p_pos_maior_x1)],
@@ -521,7 +538,6 @@ with abas_principais[0]:
     fmt_disc = f"{{:.{casas_disc}f}}"
     fmt_pct = f"{{:.{max(2, casas_disc - 2)}f}}%"
 
-    # Autocompletar Priori deixada em 0.0
     avisos_autocompletar = []
     if auto_comp_priori:
         zeros_idx = [idx for idx, it in enumerate(estados_raw) if np.isclose(it["priori"], 0.0)]
@@ -533,7 +549,6 @@ with abas_principais[0]:
             nome_z = estados_raw[idx_z]["nome_input"].strip() or f"{s_a}{idx_z+1}"
             avisos_autocompletar.append(f"Priori de **{nome_z}** autocompletada com **{fmt_disc.format(comp_val)}**.")
 
-    # Autocompletar Sub-ramos deixados em 0.0 (se aplicável)
     if modo_veros.startswith("Sub-ramificações Paralelas"):
         for idx, it in enumerate(estados_raw):
             subs = it["subramos"]
@@ -549,7 +564,6 @@ with abas_principais[0]:
                     )
             it["veros_direta"] = sum(s["p_sub"] * s["p_ev_sub"] for s in subs)
 
-    # Normalização opcional de Prioris
     soma_bruta = sum(it["priori"] for it in estados_raw)
     if auto_norm_priori and soma_bruta > 0 and not np.isclose(soma_bruta, 1.0):
         for it in estados_raw:
@@ -1415,13 +1429,14 @@ with abas_principais[6]:
 
 
 # ==============================================================================
-# ABA 8: HISTÓRICO DA CALCULADORA (COM RENOMEAÇÃO INLINE E EXPORTAÇÃO CSV)
+# ABA 8: HISTÓRICO DA CALCULADORA (COM LIXEIRA POR LINHA, RENUMERAÇÃO E EDIÇÃO)
 # ==============================================================================
 with abas_principais[7]:
     st.subheader("📜 Histórico de Cálculos da Sessão")
     st.caption(
         "Todos os cálculos confirmados no botão **'🔄 Calcular / Atualizar'** ficam registrados aqui. "
-        "💡 **Para renomear qualquer questão**, dê dois cliques na célula **'🏷️ Rótulo'** (ou **'Aba / Modelo'**) na tabela abaixo ou edite diretamente no card do cálculo."
+        "💡 **Para renomear**, dê dois cliques na coluna **'🏷️ Rótulo'**. "
+        "**Para apagar uma linha**, basta clicar na caixinha da coluna **'🗑️'** (os números **'#'** se reajustam automaticamente)."
     )
 
     hist = st.session_state["historico_calculos"]
@@ -1449,14 +1464,16 @@ with abas_principais[7]:
                 "🏷️ Rótulo": item.get("rotulo", ""),
                 "Aba / Modelo": item["aba"],
                 "Parâmetros Utilizados": item["parametros"],
-                "Resultado Principal": item["resultado"]
+                "Resultado Principal": item["resultado"],
+                "🗑️": False
             }
             for item in hist_filtrado
         ])
 
         col_csv.write("")
         col_csv.write("")
-        csv_bytes = df_resumo_hist.to_csv(index=False).encode("utf-8-sig")
+        df_csv = df_resumo_hist.drop(columns=["🗑️"])
+        csv_bytes = df_csv.to_csv(index=False).encode("utf-8-sig")
         col_csv.download_button(
             "📥 Baixar CSV",
             data=csv_bytes,
@@ -1469,31 +1486,47 @@ with abas_principais[7]:
         col_del_all.write("")
         if col_del_all.button("🗑️ Deletar Tudo", type="primary", use_container_width=True):
             st.session_state["historico_calculos"] = []
+            st.session_state["contador_historico"] = 0
             st.rerun()
 
-        with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico (Clique duplo para editar o Rótulo)", expanded=True):
+        with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico (Clique duplo para editar Rótulo | Clique em 🗑️ para excluir linha)", expanded=True):
             df_editado = st.data_editor(
                 df_resumo_hist,
                 use_container_width=True,
                 hide_index=True,
                 disabled=["#", "Hora", "Parâmetros Utilizados", "Resultado Principal"],
                 column_config={
+                    "#": st.column_config.NumberColumn("#", width="small"),
+                    "Hora": st.column_config.TextColumn("Hora", width="small"),
                     "🏷️ Rótulo": st.column_config.TextColumn(
                         "🏷️ Rótulo",
-                        help="Dê dois cliques para editar o número/nome da questão (ex: 26, 27)"
+                        help="Dê dois cliques para editar o número/nome da questão (ex: 26, 27)",
+                        width="small"
                     ),
                     "Aba / Modelo": st.column_config.TextColumn(
                         "Aba / Modelo",
                         help="Você também pode editar o rótulo entre colchetes diretamente aqui (ex: 1. Teorema de Bayes [26])"
+                    ),
+                    "🗑️": st.column_config.CheckboxColumn(
+                        "🗑️",
+                        help="Clique aqui para excluir esta linha imediatamente (as tags '#' serão renumeradas)",
+                        default=False,
+                        width="small"
                     )
                 },
                 key="editor_tabela_historico"
             )
 
-            # Sincroniza edições feitas diretamente na tabela com o st.session_state
+            # Verifica exclusões pela coluna 🗑️ e edições de rótulo na tabela
+            ids_para_excluir = set()
             alterou_tabela = False
+
             for _, row in df_editado.iterrows():
                 id_alvo = int(row["#"])
+                if bool(row.get("🗑️", False)):
+                    ids_para_excluir.add(id_alvo)
+                    continue
+
                 novo_rot_tab = "" if pd.isna(row["🏷️ Rótulo"]) else str(row["🏷️ Rótulo"]).strip()
                 nova_aba_tab = "" if pd.isna(row["Aba / Modelo"]) else str(row["Aba / Modelo"]).strip()
 
@@ -1516,7 +1549,14 @@ with abas_principais[7]:
                             alterou_tabela = True
                         break
 
-            if alterou_tabela:
+            if ids_para_excluir:
+                st.session_state["historico_calculos"] = [
+                    h for h in st.session_state["historico_calculos"]
+                    if h["id"] not in ids_para_excluir
+                ]
+                renumerar_historico()
+                st.rerun()
+            elif alterou_tabela:
                 st.rerun()
 
         st.markdown("##### 🗂️ Detalhes de Cada Cálculo")
@@ -1530,22 +1570,23 @@ with abas_principais[7]:
                     if item["detalhes"]:
                         st.caption(f"ℹ️ {item['detalhes']}")
                 with c_ren:
-                    key_ren = f"edit_rot_{item['id']}"
+                    key_ren = f"edit_rot_{item['uid']}"
                     st.text_input(
                         "🏷️ Rótulo / Questão:",
                         value=item.get("rotulo", ""),
                         placeholder="Ex: 26",
                         key=key_ren,
                         on_change=cb_renomear_item_card,
-                        args=(item["id"], key_ren)
+                        args=(item["uid"], key_ren)
                     )
                 with c_btn:
                     st.write("")
                     st.write("")
-                    if st.button("❌ Excluir", key=f"del_item_{item['id']}", use_container_width=True):
+                    if st.button("🗑️ Excluir", key=f"del_item_{item['uid']}", use_container_width=True):
                         st.session_state["historico_calculos"] = [
-                            h for h in st.session_state["historico_calculos"] if h["id"] != item["id"]
+                            h for h in st.session_state["historico_calculos"] if h["uid"] != item["uid"]
                         ]
+                        renumerar_historico()
                         st.rerun()
 
                 if item["tabela"] is not None:
