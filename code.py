@@ -26,6 +26,17 @@ if "historico_calculos" not in st.session_state:
 if "contador_historico" not in st.session_state:
     st.session_state["contador_historico"] = 0
 
+# Migração retroativa para itens já existentes na sessão atual (preserva os cálculos já feitos)
+for _item in st.session_state["historico_calculos"]:
+    if "aba_base" not in _item or "rotulo" not in _item:
+        _m = re.match(r"^(.*?)\s*\[(.*)\]$", str(_item.get("aba", "")))
+        if _m:
+            _item["aba_base"] = _m.group(1).strip()
+            _item["rotulo"] = _m.group(2).strip()
+        else:
+            _item["aba_base"] = str(_item.get("aba", "")).strip()
+            _item["rotulo"] = ""
+
 
 # ==============================================================================
 # FUNÇÕES DE QOL: AUTO-DECIMAL, AUTO-SELECT, PARSER DE AMOSTRA E CALLBACKS
@@ -112,6 +123,27 @@ def cb_post_para_priori_conjugado(key_a, val_a, key_b, val_b):
     st.session_state[key_b] = round(float(val_b), 6)
 
 
+def atualizar_rotulo_item(item, novo_rotulo):
+    """Atualiza o rótulo e reconstrói o nome de exibição da aba no histórico."""
+    rot = str(novo_rotulo).strip() if novo_rotulo is not None else ""
+    aba_base = item.get("aba_base", item.get("aba", "")).strip()
+    item["aba_base"] = aba_base
+    item["rotulo"] = rot
+    item["aba"] = f"{aba_base} [{rot}]" if rot else aba_base
+    key_input = f"edit_rot_{item['id']}"
+    if key_input in st.session_state:
+        st.session_state[key_input] = rot
+
+
+def cb_renomear_item_card(item_id, key_input):
+    """Callback para renomear o rótulo a partir do campo dentro do card do histórico."""
+    novo_rot = st.session_state.get(key_input, "")
+    for h in st.session_state["historico_calculos"]:
+        if h["id"] == item_id:
+            atualizar_rotulo_item(h, novo_rot)
+            break
+
+
 # Script JS invisível:
 # 1) Seleciona automaticamente todo o texto ao focar/clicar em qualquer input numérico (sem precisar de Backspace)
 # 2) Puxa inteiros digitados (ex: "16", "82", "5", "05") para depois da vírgula nos campos decimais (step 0.01 / 0.05)
@@ -171,11 +203,14 @@ def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, de
     st.session_state["contador_historico"] += 1
     novo_id = st.session_state["contador_historico"]
     agora = datetime.now().strftime("%H:%M:%S")
-    aba_exibicao = f"{aba} [{rotulo.strip()}]" if rotulo and rotulo.strip() else aba
+    rot_limpo = rotulo.strip() if rotulo else ""
+    aba_exibicao = f"{aba} [{rot_limpo}]" if rot_limpo else aba
 
     item = {
         "id": novo_id,
         "hora": agora,
+        "aba_base": aba,
+        "rotulo": rot_limpo,
         "aba": aba_exibicao,
         "parametros": resumo_params,
         "resultado": resumo_resultado,
@@ -445,7 +480,7 @@ with abas_principais[0]:
                 estados_raw.append({
                     "nome_input": nome_input,
                     "priori": priori_val,
-                    "veros_direta": 0.0,  # Calculado após eventual autocompletar de sub-ramos
+                    "veros_direta": 0.0,
                     "subramos": subramos_i
                 })
 
@@ -1263,7 +1298,7 @@ with abas_principais[6]:
             nome_dist = f"Cauchy(x0={loc_c:g}, γ={sc_c:g})"
             suporte_min, suporte_max = loc_c - 6 * sc_c, loc_c + 6 * sc_c
 
-        cx1, cx2, cpq, ccas, cnot = st.columns([1, 1, 1.1, 0.8, 1])
+        cx1, cx2, cpq, ccas, cnot, crot = st.columns([1, 1, 1.1, 0.8, 0.9, 1])
         if dist_escolhida == "Beta":
             x1_exp = input_decimal_01(cx1, "Valor x1:", value=0.25, step=0.05, key="exp_beta_x1")
             x2_exp = input_decimal_01(cx2, "Valor x2:", value=0.62, step=0.05, key="exp_beta_x2")
@@ -1273,7 +1308,8 @@ with abas_principais[6]:
 
         p_quantil = input_decimal_01(cpq, "Prob. p/ Quantil (p):", value=0.95, min_value=0.0001, step=0.01, key="exp_pq")
         casas_exp = ccas.number_input("Casas dec.:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
-        notacao_exp = cnot.checkbox("Notação científica", value=False)
+        notacao_exp = cnot.checkbox("Notação cient.", value=False)
+        rotulo_exp = crot.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q7", key="exp_rot")
 
         sub_exp = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
@@ -1338,7 +1374,7 @@ with abas_principais[6]:
         registrar_historico(
             f"7. Explorador ({dist_escolhida})",
             f"{nome_dist} | x1={x1_exp:g}, x2={x2_exp:g}",
-            res_exp_str, df_exp
+            res_exp_str, df_exp, rotulo=rotulo_exp
         )
 
     with col_graf_exp:
@@ -1379,11 +1415,14 @@ with abas_principais[6]:
 
 
 # ==============================================================================
-# ABA 8: HISTÓRICO DA CALCULADORA (COM EXPORTAÇÃO CSV)
+# ABA 8: HISTÓRICO DA CALCULADORA (COM RENOMEAÇÃO INLINE E EXPORTAÇÃO CSV)
 # ==============================================================================
 with abas_principais[7]:
     st.subheader("📜 Histórico de Cálculos da Sessão")
-    st.caption("Todos os cálculos confirmados no botão **'🔄 Calcular / Atualizar'** de qualquer aba ficam registrados aqui.")
+    st.caption(
+        "Todos os cálculos confirmados no botão **'🔄 Calcular / Atualizar'** ficam registrados aqui. "
+        "💡 **Para renomear qualquer questão**, dê dois cliques na célula **'🏷️ Rótulo'** (ou **'Aba / Modelo'**) na tabela abaixo ou edite diretamente no card do cálculo."
+    )
 
     hist = st.session_state["historico_calculos"]
 
@@ -1392,13 +1431,13 @@ with abas_principais[7]:
     else:
         col_f1, col_f2, col_csv, col_del_all = st.columns([1.6, 1.3, 1.1, 1.1])
 
-        abas_disponiveis = ["Todas"] + sorted(list({item["aba"] for item in hist}))
+        abas_disponiveis = ["Todas"] + sorted(list({item.get("aba_base", item["aba"]) for item in hist}))
         filtro_aba = col_f1.selectbox("Filtrar por Modelo / Aba:", abas_disponiveis)
         ordem_hist = col_f2.selectbox("Ordenação:", ["Mais recentes primeiro", "Mais antigos primeiro"])
 
         hist_filtrado = [
             item for item in hist
-            if filtro_aba == "Todas" or item["aba"] == filtro_aba
+            if filtro_aba == "Todas" or item.get("aba_base", item["aba"]) == filtro_aba or item["aba"] == filtro_aba
         ]
         if ordem_hist == "Mais recentes primeiro":
             hist_filtrado = list(reversed(hist_filtrado))
@@ -1407,6 +1446,7 @@ with abas_principais[7]:
             {
                 "#": item["id"],
                 "Hora": item["hora"],
+                "🏷️ Rótulo": item.get("rotulo", ""),
                 "Aba / Modelo": item["aba"],
                 "Parâmetros Utilizados": item["parametros"],
                 "Resultado Principal": item["resultado"]
@@ -1431,20 +1471,77 @@ with abas_principais[7]:
             st.session_state["historico_calculos"] = []
             st.rerun()
 
-        with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico", expanded=True):
-            st.dataframe(df_resumo_hist, use_container_width=True, hide_index=True)
+        with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico (Clique duplo para editar o Rótulo)", expanded=True):
+            df_editado = st.data_editor(
+                df_resumo_hist,
+                use_container_width=True,
+                hide_index=True,
+                disabled=["#", "Hora", "Parâmetros Utilizados", "Resultado Principal"],
+                column_config={
+                    "🏷️ Rótulo": st.column_config.TextColumn(
+                        "🏷️ Rótulo",
+                        help="Dê dois cliques para editar o número/nome da questão (ex: 26, 27)"
+                    ),
+                    "Aba / Modelo": st.column_config.TextColumn(
+                        "Aba / Modelo",
+                        help="Você também pode editar o rótulo entre colchetes diretamente aqui (ex: 1. Teorema de Bayes [26])"
+                    )
+                },
+                key="editor_tabela_historico"
+            )
+
+            # Sincroniza edições feitas diretamente na tabela com o st.session_state
+            alterou_tabela = False
+            for _, row in df_editado.iterrows():
+                id_alvo = int(row["#"])
+                novo_rot_tab = "" if pd.isna(row["🏷️ Rótulo"]) else str(row["🏷️ Rótulo"]).strip()
+                nova_aba_tab = "" if pd.isna(row["Aba / Modelo"]) else str(row["Aba / Modelo"]).strip()
+
+                for orig_item in st.session_state["historico_calculos"]:
+                    if orig_item["id"] == id_alvo:
+                        rot_atual = orig_item.get("rotulo", "")
+                        aba_atual = orig_item.get("aba", "")
+
+                        if novo_rot_tab != rot_atual:
+                            atualizar_rotulo_item(orig_item, novo_rot_tab)
+                            alterou_tabela = True
+                        elif nova_aba_tab != aba_atual and nova_aba_tab:
+                            m_aba = re.match(r"^(.*?)\s*\[(.*)\]$", nova_aba_tab)
+                            if m_aba:
+                                orig_item["aba_base"] = m_aba.group(1).strip()
+                                atualizar_rotulo_item(orig_item, m_aba.group(2).strip())
+                            else:
+                                orig_item["aba_base"] = nova_aba_tab
+                                atualizar_rotulo_item(orig_item, "")
+                            alterou_tabela = True
+                        break
+
+            if alterou_tabela:
+                st.rerun()
 
         st.markdown("##### 🗂️ Detalhes de Cada Cálculo")
         for idx, item in enumerate(hist_filtrado):
             titulo_exp = f"#{item['id']} [{item['hora']}] — {item['aba']} | {item['resultado']}"
             with st.expander(titulo_exp, expanded=(idx == 0)):
-                c_det, c_btn = st.columns([4.5, 1])
+                c_det, c_ren, c_btn = st.columns([3.3, 1.3, 0.8])
                 with c_det:
                     st.markdown(f"**Parâmetros:** `{item['parametros']}`")
                     st.markdown(f"**Resultado Principal:** `{item['resultado']}`")
                     if item["detalhes"]:
                         st.caption(f"ℹ️ {item['detalhes']}")
+                with c_ren:
+                    key_ren = f"edit_rot_{item['id']}"
+                    st.text_input(
+                        "🏷️ Rótulo / Questão:",
+                        value=item.get("rotulo", ""),
+                        placeholder="Ex: 26",
+                        key=key_ren,
+                        on_change=cb_renomear_item_card,
+                        args=(item["id"], key_ren)
+                    )
                 with c_btn:
+                    st.write("")
+                    st.write("")
                     if st.button("❌ Excluir", key=f"del_item_{item['id']}", use_container_width=True):
                         st.session_state["historico_calculos"] = [
                             h for h in st.session_state["historico_calculos"] if h["id"] != item["id"]
