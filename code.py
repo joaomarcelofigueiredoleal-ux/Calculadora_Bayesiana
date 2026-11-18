@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import streamlit.components.v1 as components
 import numpy as np
@@ -27,7 +28,7 @@ if "contador_historico" not in st.session_state:
 
 
 # ==============================================================================
-# CONVERSÃO AUTOMÁTICA DE INTEIROS PARA DECIMAIS (EX: 16 -> 0.16 | 05 -> 0.05)
+# FUNÇÕES DE QOL: AUTO-DECIMAL, AUTO-SELECT, PARSER DE AMOSTRA E CALLBACKS
 # ==============================================================================
 def normalizar_para_decimal(val, min_val=0.0):
     """Converte valores > 1 puxando os dígitos para depois da vírgula (ex: 16 -> 0.16)."""
@@ -43,7 +44,7 @@ def normalizar_para_decimal(val, min_val=0.0):
 def input_decimal_01(container, label, value, key, min_value=0.0, step=0.01, fmt="%.4f"):
     """
     Campo numérico para probabilidades e proporções em [0, 1] sem bloqueio de max_value=1.0
-    no frontend, convertendo inteiros digitados (ex: 16) automaticamente para 0.16.
+    no frontend, convertendo inteiros digitados (ex: 16 -> 0.16, 05 -> 0.05) automaticamente.
     """
     if key in st.session_state and st.session_state[key] is not None:
         if st.session_state[key] > 1.0:
@@ -60,23 +61,74 @@ def input_decimal_01(container, label, value, key, min_value=0.0, step=0.01, fmt
     return normalizar_para_decimal(val_bruto, min_value)
 
 
-# Script JS invisível que converte inteiros digitados (inclusive com zero à esquerda, como "05" -> "0.05")
-# imediatamente ao pressionar Enter ou Tab nos campos decimais (step 0.01 ou 0.05).
+def parse_amostra_bruta(texto):
+    """
+    Extrai uma lista de números a partir de texto livre separado por vírgulas,
+    ponto-e-vírgula ou espaços (ex: '3, 5, 2, 6' ou '1,5; 2,3; 0,9').
+    """
+    if not texto or not texto.strip():
+        return None
+    texto_limpo = texto.strip()
+    if ";" in texto_limpo:
+        partes = [p.strip().replace(",", ".") for p in texto_limpo.split(";") if p.strip()]
+    elif "," in texto_limpo:
+        partes = [p.strip() for p in re.split(r"[,\s]+", texto_limpo) if p.strip()]
+    else:
+        partes = [p.strip().replace(",", ".") for p in texto_limpo.split() if p.strip()]
+    try:
+        valores = [float(p) for p in partes]
+        return valores if len(valores) > 0 else None
+    except ValueError:
+        return None
+
+
+def calcular_moda_conjugada(tipo, param1, scale_or_b):
+    """Calcula a moda analítica (MAP) para distribuições Beta(a, b) ou Gama(alpha, scale)."""
+    if tipo == "beta":
+        a, b = param1, scale_or_b
+        if a > 1.0 and b > 1.0:
+            return (a - 1.0) / (a + b - 2.0)
+        elif a == 1.0 and b == 1.0:
+            return np.nan
+        elif a <= 1.0 and b > 1.0:
+            return 0.0
+        elif a > 1.0 and b <= 1.0:
+            return 1.0
+        return np.nan
+    elif tipo == "gama":
+        alpha, scale = param1, scale_or_b
+        return (alpha - 1.0) * scale if alpha >= 1.0 else 0.0
+    return np.nan
+
+
+# Callbacks para Atualização Bayesiana Sequencial (Posteriori -> Nova Priori)
+def cb_post_para_priori_discreto(post_vals):
+    for idx, val in enumerate(post_vals):
+        st.session_state[f"disc_p_{idx}"] = round(float(val), 6)
+
+
+def cb_post_para_priori_conjugado(key_a, val_a, key_b, val_b):
+    st.session_state[key_a] = round(float(val_a), 6)
+    st.session_state[key_b] = round(float(val_b), 6)
+
+
+# Script JS invisível:
+# 1) Seleciona automaticamente todo o texto ao focar/clicar em qualquer input numérico (sem precisar de Backspace)
+# 2) Puxa inteiros digitados (ex: "16", "82", "5", "05") para depois da vírgula nos campos decimais (step 0.01 / 0.05)
 components.html(
     """
     <script>
     (function() {
         const doc = window.parent.document;
-        if (doc.__decimalAutoPullInstalled) return;
-        doc.__decimalAutoPullInstalled = true;
+        if (doc.__bayesLabQoLInstalled) return;
+        doc.__bayesLabQoLInstalled = true;
 
         function converterSeInteiro(input) {
-            if (!input || input.tagName !== 'INPUT' || input.type !== 'number') return;
+            if (!input || input.tagName !== 'INPUT') return;
             const step = input.getAttribute('step');
             if (step !== '0.01' && step !== '0.05') return;
 
             const raw = (input.value || '').trim();
-            // Se digitou apenas dígitos (ex: "16", "82", "5", "05") sem vírgula ou ponto
             if (/^\\d+$/.test(raw) && raw !== '0' && raw !== '1') {
                 const novoValor = '0.' + raw;
                 const nativeSetter = Object.getOwnPropertyDescriptor(
@@ -87,6 +139,16 @@ components.html(
                 input.dispatchEvent(new Event('change', { bubbles: true }));
             }
         }
+
+        // Auto-select ao focar em qualquer campo numérico para digitação imediata
+        doc.addEventListener('focusin', function(e) {
+            const el = e.target;
+            if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.hasAttribute('step'))) {
+                setTimeout(function() {
+                    try { el.select(); } catch (err) {}
+                }, 15);
+            }
+        }, true);
 
         doc.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' || e.key === 'Tab') {
@@ -104,23 +166,24 @@ components.html(
 )
 
 
-def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, detalhes_extras=""):
+def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, detalhes_extras="", rotulo=""):
     """Salva um cálculo realizado no histórico da sessão."""
     st.session_state["contador_historico"] += 1
     novo_id = st.session_state["contador_historico"]
     agora = datetime.now().strftime("%H:%M:%S")
+    aba_exibicao = f"{aba} [{rotulo.strip()}]" if rotulo and rotulo.strip() else aba
 
     item = {
         "id": novo_id,
         "hora": agora,
-        "aba": aba,
+        "aba": aba_exibicao,
         "parametros": resumo_params,
         "resultado": resumo_resultado,
         "detalhes": detalhes_extras,
         "tabela": df_tabela.copy() if df_tabela is not None else None
     }
     st.session_state["historico_calculos"].append(item)
-    st.toast(f"✅ Cálculo #{novo_id} ({aba}) salvo no Histórico!")
+    st.toast(f"✅ Cálculo #{novo_id} ({aba_exibicao}) salvo no Histórico!")
 
 
 st.title("📊 Suíte de Estatística Bayesiana & Distribuições")
@@ -130,49 +193,91 @@ st.title("📊 Suíte de Estatística Bayesiana & Distribuições")
 # ==============================================================================
 def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
                                x_vals, x1_val, x2_val, casas_dec, titulo_graf, xlabel_graf,
-                               simbolo_param="θ", info_extra=""):
-    """Exibe parâmetros, tabela comparativa Priori vs Posteriori e gráfico com intervalos."""
-    a, b = sorted((x1_val, x2_val))
+                               simbolo_param="θ", info_extra="", tipo_dist="beta",
+                               params_pri=(1.0, 1.0), params_pos=(1.0, 1.0),
+                               modo_intervalo="Limites manuais (x1 e x2)",
+                               callback_seq=None, args_seq=None, key_btn_seq=None):
+    """Exibe parâmetros, tabela comparativa completa (com MAP, Mediana e ICs) e gráfico."""
     fmt = f"{{:.{casas_dec}f}}"
 
+    # Define os limites ativos com base no modo escolhido (manual ou Intervalo de Credibilidade)
+    if modo_intervalo == "IC 90% da Posteriori":
+        a, b = dist_post.ppf(0.05), dist_post.ppf(0.95)
+    elif modo_intervalo == "IC 95% da Posteriori":
+        a, b = dist_post.ppf(0.025), dist_post.ppf(0.975)
+    elif modo_intervalo == "IC 99% da Posteriori":
+        a, b = dist_post.ppf(0.005), dist_post.ppf(0.995)
+    else:
+        a, b = sorted((x1_val, x2_val))
+
+    x1_efetivo, x2_efetivo = a, b
+
     # Probabilidades na Priori
-    p_pri_menor_x1 = dist_priori.cdf(x1_val)
-    p_pri_maior_x1 = dist_priori.sf(x1_val)
-    p_pri_menor_x2 = dist_priori.cdf(x2_val)
-    p_pri_maior_x2 = dist_priori.sf(x2_val)
+    p_pri_menor_x1 = dist_priori.cdf(x1_efetivo)
+    p_pri_maior_x1 = dist_priori.sf(x1_efetivo)
+    p_pri_menor_x2 = dist_priori.cdf(x2_efetivo)
+    p_pri_maior_x2 = dist_priori.sf(x2_efetivo)
     p_pri_interv   = dist_priori.cdf(b) - dist_priori.cdf(a)
 
     # Probabilidades na Posteriori
-    p_pos_menor_x1 = dist_post.cdf(x1_val)
-    p_pos_maior_x1 = dist_post.sf(x1_val)
-    p_pos_menor_x2 = dist_post.cdf(x2_val)
-    p_pos_maior_x2 = dist_post.sf(x2_val)
+    p_pos_menor_x1 = dist_post.cdf(x1_efetivo)
+    p_pos_maior_x1 = dist_post.sf(x1_efetivo)
+    p_pos_menor_x2 = dist_post.cdf(x2_efetivo)
+    p_pos_maior_x2 = dist_post.sf(x2_efetivo)
     p_pos_interv   = dist_post.cdf(b) - dist_post.cdf(a)
 
-    # Resumo em destaque
-    c1, c2 = st.columns(2)
+    # Moda (MAP) e Mediana
+    moda_pri = calcular_moda_conjugada(tipo_dist, params_pri[0], params_pri[1])
+    moda_pos = calcular_moda_conjugada(tipo_dist, params_pos[0], params_pos[1])
+    str_moda_pri = fmt.format(moda_pri) if not np.isnan(moda_pri) else "Não única / Fronteira"
+    str_moda_pos = fmt.format(moda_pos) if not np.isnan(moda_pos) else "Não única / Fronteira"
+
+    # Intervalos de Credibilidade Simétricos (Equal-Tailed)
+    ic90_pri = f"[{fmt.format(dist_priori.ppf(0.05))}; {fmt.format(dist_priori.ppf(0.95))}]"
+    ic90_pos = f"[{fmt.format(dist_post.ppf(0.05))}; {fmt.format(dist_post.ppf(0.95))}]"
+    ic95_pri = f"[{fmt.format(dist_priori.ppf(0.025))}; {fmt.format(dist_priori.ppf(0.975))}]"
+    ic95_pos = f"[{fmt.format(dist_post.ppf(0.025))}; {fmt.format(dist_post.ppf(0.975))}]"
+    ic99_pri = f"[{fmt.format(dist_priori.ppf(0.005))}; {fmt.format(dist_priori.ppf(0.995))}]"
+    ic99_pos = f"[{fmt.format(dist_post.ppf(0.005))}; {fmt.format(dist_post.ppf(0.995))}]"
+
+    # Resumo em destaque + Botão de Atualização Sequencial
+    c1, c2, c3 = st.columns([1.4, 1.4, 1.1])
     c1.info(f"**Priori (Antes):** `{nome_priori}`")
     c2.error(f"**Posteriori (Depois):** `{nome_post}`")
+    if callback_seq is not None:
+        c3.button(
+            "🔁 Usar Posteriori como Nova Priori",
+            on_click=callback_seq,
+            args=args_seq,
+            key=key_btn_seq,
+            use_container_width=True,
+            help="Copia os parâmetros da Posteriori atual para os campos da Priori para fazer uma atualização sequencial."
+        )
     if info_extra:
         st.caption(f"ℹ️ {info_extra}")
 
     # Tabela comparativa
     dados_tabela = [
-        [f"P({simbolo_param} < {x1_val:g})", fmt.format(p_pri_menor_x1), fmt.format(p_pos_menor_x1)],
-        [f"P({simbolo_param} > {x1_val:g})", fmt.format(p_pri_maior_x1), fmt.format(p_pos_maior_x1)],
-        [f"P({simbolo_param} < {x2_val:g})", fmt.format(p_pri_menor_x2), fmt.format(p_pos_menor_x2)],
-        [f"P({simbolo_param} > {x2_val:g})", fmt.format(p_pri_maior_x2), fmt.format(p_pos_maior_x2)],
-        [f"P({a:g} < {simbolo_param} < {b:g})", fmt.format(p_pri_interv), fmt.format(p_pos_interv)],
+        [f"P({simbolo_param} < {x1_efetivo:.4g})", fmt.format(p_pri_menor_x1), fmt.format(p_pos_menor_x1)],
+        [f"P({simbolo_param} > {x1_efetivo:.4g})", fmt.format(p_pri_maior_x1), fmt.format(p_pos_maior_x1)],
+        [f"P({simbolo_param} < {x2_efetivo:.4g})", fmt.format(p_pri_menor_x2), fmt.format(p_pos_menor_x2)],
+        [f"P({simbolo_param} > {x2_efetivo:.4g})", fmt.format(p_pri_maior_x2), fmt.format(p_pos_maior_x2)],
+        [f"P({a:.4g} < {simbolo_param} < {b:.4g})", fmt.format(p_pri_interv), fmt.format(p_pos_interv)],
         [f"Média E[{simbolo_param}]", fmt.format(dist_priori.mean()), fmt.format(dist_post.mean())],
+        [f"Mediana (Quantil 50%)", fmt.format(dist_priori.ppf(0.5)), fmt.format(dist_post.ppf(0.5))],
+        [f"Moda / MAP[{simbolo_param}]", str_moda_pri, str_moda_pos],
         [f"Variância Var[{simbolo_param}]", fmt.format(dist_priori.var()), fmt.format(dist_post.var())],
-        [f"Desvio Padrão DP[{simbolo_param}]", fmt.format(dist_priori.std()), fmt.format(dist_post.std())]
+        [f"Desvio Padrão DP[{simbolo_param}]", fmt.format(dist_priori.std()), fmt.format(dist_post.std())],
+        ["IC 90% (Simétrico)", ic90_pri, ic90_pos],
+        ["IC 95% (Simétrico)", ic95_pri, ic95_pos],
+        ["IC 99% (Simétrico)", ic99_pri, ic99_pos]
     ]
     df_res = pd.DataFrame(
         dados_tabela,
         columns=["Medida / Probabilidade", "Priori (Antes)", "Posteriori (Depois)"]
     )
 
-    col_tab, col_graf = st.columns([1, 1.4])
+    col_tab, col_graf = st.columns([1.05, 1.35])
     with col_tab:
         st.subheader("📋 Tabela Comparativa")
         st.table(df_res.set_index("Medida / Probabilidade"))
@@ -190,20 +295,20 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
 
         ax.fill_between(
             x_vals, priori_pdf, where=mascara, color='#3498db', alpha=0.18,
-            label=f'Priori P({a:g} < {simbolo_param} < {b:g}) = {fmt.format(p_pri_interv)}'
+            label=f'Priori P({a:.4g} < {simbolo_param} < {b:.4g}) = {fmt.format(p_pri_interv)}'
         )
         ax.fill_between(
             x_vals, post_pdf, where=mascara, color='#e74c3c', alpha=0.25,
-            label=f'Posteriori P({a:g} < {simbolo_param} < {b:g}) = {fmt.format(p_pos_interv)}'
+            label=f'Posteriori P({a:.4g} < {simbolo_param} < {b:.4g}) = {fmt.format(p_pos_interv)}'
         )
 
-        ax.axvline(x=x1_val, linestyle=":", color='darkred', alpha=0.8, label=f'x1 = {x1_val:g}')
-        ax.axvline(x=x2_val, linestyle=":", color='darkgreen', alpha=0.8, label=f'x2 = {x2_val:g}')
+        ax.axvline(x=x1_efetivo, linestyle=":", color='darkred', alpha=0.8, label=f'x1 = {x1_efetivo:.4g}')
+        ax.axvline(x=x2_efetivo, linestyle=":", color='darkgreen', alpha=0.8, label=f'x2 = {x2_efetivo:.4g}')
 
         ax.set_title(titulo_graf, fontsize=13)
         ax.set_xlabel(xlabel_graf, fontsize=11)
         ax.set_ylabel('Densidade', fontsize=11)
-        ax.legend(loc='best', fontsize=9)
+        ax.legend(loc='best', fontsize=8.8)
         ax.grid(alpha=0.3)
         fig.tight_layout()
         st.pyplot(fig)
@@ -211,8 +316,8 @@ def exibir_relatorio_conjugado(dist_priori, dist_post, nome_priori, nome_post,
 
     resumo_res = (
         f"Posteriori: {nome_post} | "
-        f"P({a:g} < {simbolo_param} < {b:g}) = {fmt.format(p_pos_interv)} | "
-        f"E[{simbolo_param}] = {fmt.format(dist_post.mean())}"
+        f"P({a:.4g} < {simbolo_param} < {b:.4g}) = {fmt.format(p_pos_interv)} | "
+        f"E[{simbolo_param}] = {fmt.format(dist_post.mean())} | MAP = {str_moda_pos}"
     )
     return df_res, resumo_res
 
@@ -233,12 +338,11 @@ abas_principais = st.tabs([
 ])
 
 # ==============================================================================
-# ABA 1: TEOREMA DE BAYES DISCRETO (COM RAMIFICAÇÕES NA VEROSSIMILHANÇA)
+# ABA 1: TEOREMA DE BAYES DISCRETO (COM RAMIFICAÇÕES E AUTOCOMPLETAR)
 # ==============================================================================
 with abas_principais[0]:
     st.subheader("Teorema de Bayes - Atualização de Probabilidades (Discreto)")
 
-    # Controles estruturais fora do form para atualização imediata dos campos
     cfg1, cfg2, cfg3 = st.columns([1.1, 2.2, 1.2])
     num_estados = cfg1.number_input("Nº Opções (Hipóteses):", min_value=2, max_value=10, value=2, step=1)
     modo_veros = cfg2.selectbox(
@@ -257,11 +361,23 @@ with abas_principais[0]:
         num_subramos = 1
 
     with st.form("form_bayes_discreto"):
-        c2, c3, c4, c5 = st.columns([1.5, 1.5, 1.2, 1])
+        c2, c3, c4, c5, c6 = st.columns([1.4, 1.4, 1.0, 0.9, 1.2])
         nome_evento = c2.text_input("Evento (Evidência - B):", value="Recessão")
         termo_a = c3.text_input("Termo p/ A (ex: Premissa):", value="Premissa")
         simbolo_a = c4.text_input("Símbolo p/ A (ex: A, H):", value="A")
         casas_disc = c5.number_input("Casas decimais:", min_value=2, max_value=10, value=4, step=1)
+        rotulo_disc = c6.text_input("🏷️ Rótulo (opcional):", value="", placeholder="Ex: Questão 1")
+
+        qol_c1, qol_c2 = st.columns(2)
+        auto_comp_priori = qol_c1.checkbox(
+            "✨ Autocompletar opção deixada em 0,0000 com o complementar (1 - ∑P)",
+            value=True,
+            help="Se exatamente uma hipótese (ou um sub-ramo) for deixada com probabilidade 0 e as demais somarem menos que 1, preenche automaticamente o valor restante."
+        )
+        auto_norm_priori = qol_c2.checkbox(
+            "⚖️ Normalizar Prioris automaticamente se a soma for diferente de 1",
+            value=False
+        )
 
         ev = nome_evento.strip() if nome_evento.strip() else "B"
         t_a = termo_a.strip() if termo_a.strip() else "Opção"
@@ -329,7 +445,7 @@ with abas_principais[0]:
                 estados_raw.append({
                     "nome_input": nome_input,
                     "priori": priori_val,
-                    "veros_direta": sum(s["p_sub"] * s["p_ev_sub"] for s in subramos_i),
+                    "veros_direta": 0.0,  # Calculado após eventual autocompletar de sub-ramos
                     "subramos": subramos_i
                 })
 
@@ -370,6 +486,41 @@ with abas_principais[0]:
     fmt_disc = f"{{:.{casas_disc}f}}"
     fmt_pct = f"{{:.{max(2, casas_disc - 2)}f}}%"
 
+    # Autocompletar Priori deixada em 0.0
+    avisos_autocompletar = []
+    if auto_comp_priori:
+        zeros_idx = [idx for idx, it in enumerate(estados_raw) if np.isclose(it["priori"], 0.0)]
+        soma_atual = sum(it["priori"] for it in estados_raw)
+        if len(zeros_idx) == 1 and 0.0 < soma_atual < 1.0:
+            idx_z = zeros_idx[0]
+            comp_val = round(1.0 - soma_atual, 10)
+            estados_raw[idx_z]["priori"] = comp_val
+            nome_z = estados_raw[idx_z]["nome_input"].strip() or f"{s_a}{idx_z+1}"
+            avisos_autocompletar.append(f"Priori de **{nome_z}** autocompletada com **{fmt_disc.format(comp_val)}**.")
+
+    # Autocompletar Sub-ramos deixados em 0.0 (se aplicável)
+    if modo_veros.startswith("Sub-ramificações Paralelas"):
+        for idx, it in enumerate(estados_raw):
+            subs = it["subramos"]
+            if auto_comp_priori:
+                z_sub = [j for j, s in enumerate(subs) if np.isclose(s["p_sub"], 0.0)]
+                soma_s = sum(s["p_sub"] for s in subs)
+                if len(z_sub) == 1 and 0.0 < soma_s < 1.0:
+                    j_z = z_sub[0]
+                    comp_s = round(1.0 - soma_s, 10)
+                    subs[j_z]["p_sub"] = comp_s
+                    avisos_autocompletar.append(
+                        f"Sub-ramo **{subs[j_z]['nome']}** autocompletado com **{fmt_disc.format(comp_s)}**."
+                    )
+            it["veros_direta"] = sum(s["p_sub"] * s["p_ev_sub"] for s in subs)
+
+    # Normalização opcional de Prioris
+    soma_bruta = sum(it["priori"] for it in estados_raw)
+    if auto_norm_priori and soma_bruta > 0 and not np.isclose(soma_bruta, 1.0):
+        for it in estados_raw:
+            it["priori"] = it["priori"] / soma_bruta
+        avisos_autocompletar.append(f"Prioris normalizadas automaticamente (soma original era {soma_bruta:.4g}).")
+
     estados_dict = {}
     for i, item in enumerate(estados_raw):
         nome_val = item["nome_input"].strip() if item["nome_input"].strip() else f"{s_a}{i+1}"
@@ -386,7 +537,10 @@ with abas_principais[0]:
     p_ev = sum(estados_dict[k]["priori"] * estados_dict[k]["veros"] for k in nomes_lista)
 
     st.divider()
-    col_sel, col_res1, col_res2 = st.columns([1.2, 1.4, 1.4])
+    if avisos_autocompletar:
+        st.caption("✨ " + " | ".join(avisos_autocompletar))
+
+    col_sel, col_res1, col_res2, col_seq = st.columns([1.1, 1.3, 1.3, 1.1])
     alvo = col_sel.selectbox("🎯 Destacar Posteriori de:", options=nomes_lista)
 
     if not np.isclose(soma_priors, 1.0, atol=0.01):
@@ -408,17 +562,6 @@ with abas_principais[0]:
         veros_alvo = estados_dict[alvo]["veros"]
         posteriori_alvo = (priori_alvo * veros_alvo) / p_ev
 
-        col_res1.metric(
-            label=f"Probabilidade Total P({ev})",
-            value=f"{fmt_disc.format(p_ev)} ({fmt_pct.format(p_ev*100)})"
-        )
-        col_res2.metric(
-            label=f"Posteriori em Destaque P({alvo} | {ev})",
-            value=f"{fmt_disc.format(posteriori_alvo)} ({fmt_pct.format(posteriori_alvo*100)})"
-        )
-
-        sub_disc = st.tabs(["📋 Tabela de Bayes", "📊 Gráfico de Barras", "🌳 Diagrama de Árvore"])
-
         tabela_dados = []
         priors_lista = []
         posteriors_lista = []
@@ -438,6 +581,26 @@ with abas_principais[0]:
                 f"{fmt_disc.format(post)} ({fmt_pct.format(post*100)})"
             ])
         tabela_dados.append(["TOTAL", fmt_disc.format(soma_priors), "-", fmt_disc.format(p_ev), "1.0000 (100%)"])
+
+        col_res1.metric(
+            label=f"Probabilidade Total P({ev})",
+            value=f"{fmt_disc.format(p_ev)} ({fmt_pct.format(p_ev*100)})"
+        )
+        col_res2.metric(
+            label=f"Posteriori em Destaque P({alvo} | {ev})",
+            value=f"{fmt_disc.format(posteriori_alvo)} ({fmt_pct.format(posteriori_alvo*100)})"
+        )
+        col_seq.write("")
+        col_seq.button(
+            "🔁 Usar Posteriori como Nova Priori",
+            on_click=cb_post_para_priori_discreto,
+            args=(posteriors_lista,),
+            key="btn_seq_disc",
+            use_container_width=True,
+            help="Substitui as probabilidades a Priori pelas probabilidades a Posteriori atuais para uma nova rodada."
+        )
+
+        sub_disc = st.tabs(["📋 Tabela de Bayes", "📊 Gráfico de Barras", "🌳 Diagrama de Árvore"])
 
         df_disc = pd.DataFrame(
             tabela_dados,
@@ -652,7 +815,7 @@ with abas_principais[0]:
                     for n in nomes_lista
                 )
             )
-            registrar_historico("1. Teorema de Bayes", resumo_p, resumo_r, df_disc)
+            registrar_historico("1. Teorema de Bayes", resumo_p, resumo_r, df_disc, rotulo=rotulo_disc)
 
 
 # ==============================================================================
@@ -667,10 +830,16 @@ with abas_principais[1]:
         bb_n = c3.number_input("Ensaios (n):", min_value=1, value=4, step=1, key="bb_n")
         bb_k = c4.number_input("Sucessos (k):", min_value=0, value=3, step=1, key="bb_k")
 
-        c5, c6, c7 = st.columns(3)
+        c5, c6, c7, c8, c9 = st.columns([1, 1, 1.3, 0.8, 1.1])
         bb_x1 = input_decimal_01(c5, "Limite x1:", value=0.50, step=0.05, key="bb_x1")
         bb_x2 = input_decimal_01(c6, "Limite x2:", value=0.80, step=0.05, key="bb_x2")
-        bb_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bb_casas")
+        bb_modo_ic = c7.selectbox(
+            "Intervalo sombreado:",
+            ["Limites manuais (x1 e x2)", "IC 90% da Posteriori", "IC 95% da Posteriori", "IC 99% da Posteriori"],
+            key="bb_modo_ic"
+        )
+        bb_casas = c8.number_input("Casas dec.:", min_value=1, max_value=10, value=5, step=1, key="bb_casas")
+        bb_rotulo = c9.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q2a", key="bb_rot")
 
         sub_bb = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
@@ -683,18 +852,26 @@ with abas_principais[1]:
         d_pos = beta_dist(a_post, b_post)
         theta = np.linspace(0, 1, 500)
         int_norm = beta_func(a_post, b_post) / beta_func(bb_a, bb_b)
-        info = f"Sucessos: {bb_k} | Fracassos: {bb_n - bb_k} | Integral do Núcleo: {int_norm:.6e}"
+        prob_pred_prox = a_post / (a_post + b_post)
+        info = (
+            f"Sucessos: {bb_k} | Fracassos: {bb_n - bb_k} | "
+            f"Integral do Núcleo: {int_norm:.6e} | "
+            f"Prob. Preditiva de Sucesso no Próximo Ensaio: {prob_pred_prox:.{bb_casas}f}"
+        )
 
         df_bb, res_bb = exibir_relatorio_conjugado(
             d_pri, d_pos, f"Beta({bb_a:g}; {bb_b:g})", f"Beta({a_post:g}; {b_post:g})",
             theta, bb_x1, bb_x2, bb_casas,
-            "Atualização Bayesiana (Modelo Beta-Binomial)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info
+            "Atualização Bayesiana (Modelo Beta-Binomial)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info,
+            tipo_dist="beta", params_pri=(bb_a, bb_b), params_pos=(a_post, b_post),
+            modo_intervalo=bb_modo_ic,
+            callback_seq=cb_post_para_priori_conjugado, args_seq=("bb_a", a_post, "bb_b", b_post), key_btn_seq="btn_seq_bb"
         )
         if sub_bb:
             registrar_historico(
                 "2. Beta-Binomial",
                 f"Priori: Beta({bb_a:g}; {bb_b:g}) | n={bb_n}, k={bb_k} | Intervalo: [{bb_x1:g}, {bb_x2:g}]",
-                res_bb, df_bb, info
+                res_bb, df_bb, info, rotulo=bb_rotulo
             )
 
 
@@ -707,18 +884,37 @@ with abas_principais[2]:
         c1, c2, c3, c4 = st.columns(4)
         bg_a = c1.number_input("Priori 'a':", min_value=0.0001, value=6.0, step=0.5, key="bg_a")
         bg_b = c2.number_input("Priori 'b':", min_value=0.0001, value=9.0, step=0.5, key="bg_b")
-        bg_n = c3.number_input("Total de Ensaios (n):", min_value=1, value=28, step=1, key="bg_n")
-        bg_m = c4.number_input("Sequências (sucessos):", min_value=1, value=12, step=1, key="bg_m")
+        bg_n_in = c3.number_input("Total de Ensaios (n = ∑x):", min_value=1, value=28, step=1, key="bg_n")
+        bg_m_in = c4.number_input("Sequências / Sucessos (m):", min_value=1, value=12, step=1, key="bg_m")
 
-        c5, c6, c7 = st.columns(3)
+        bg_raw = st.text_input(
+            "📥 Opcional — Colar amostra de ensaios por sequência (ex: 2, 1, 4, 3 — substitui 'n' e 'm' automaticamente):",
+            value="", key="bg_raw"
+        )
+
+        c5, c6, c7, c8, c9 = st.columns([1, 1, 1.3, 0.8, 1.1])
         bg_x1 = input_decimal_01(c5, "Limite x1:", value=0.25, step=0.05, key="bg_x1")
         bg_x2 = input_decimal_01(c6, "Limite x2:", value=0.62, step=0.05, key="bg_x2")
-        bg_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bg_casas")
+        bg_modo_ic = c7.selectbox(
+            "Intervalo sombreado:",
+            ["Limites manuais (x1 e x2)", "IC 90% da Posteriori", "IC 95% da Posteriori", "IC 99% da Posteriori"],
+            key="bg_modo_ic"
+        )
+        bg_casas = c8.number_input("Casas dec.:", min_value=1, max_value=10, value=5, step=1, key="bg_casas")
+        bg_rotulo = c9.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q3", key="bg_rot")
 
         sub_bg = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
+    amostra_bg = parse_amostra_bruta(bg_raw)
+    if amostra_bg is not None:
+        bg_m = len(amostra_bg)
+        bg_n = int(round(sum(amostra_bg)))
+        st.caption(f"📥 Amostra lida: **{bg_m} sequências (m)** | **Soma de ensaios (n) = {bg_n}** | Média = {np.mean(amostra_bg):.4g}")
+    else:
+        bg_n, bg_m = bg_n_in, bg_m_in
+
     if bg_m > bg_n:
-        st.error("❌ Erro: O número de sequências não pode ser maior que o total de ensaios (n).")
+        st.error("❌ Erro: O número de sequências (m) não pode ser maior que o total de ensaios (n).")
     else:
         fracassos = bg_n - bg_m
         a_post = bg_a + bg_m
@@ -726,18 +922,21 @@ with abas_principais[2]:
         d_pri = beta_dist(bg_a, bg_b)
         d_pos = beta_dist(a_post, b_post)
         theta = np.linspace(0, 1, 500)
-        info = f"Sucessos (sequências): {bg_m} | Fracassos (n - m): {fracassos}"
+        info = f"Sucessos (sequências m): {bg_m} | Fracassos (n - m): {fracassos}"
 
         df_bg, res_bg = exibir_relatorio_conjugado(
             d_pri, d_pos, f"Beta({bg_a:g}; {bg_b:g})", f"Beta({a_post:g}; {b_post:g})",
             theta, bg_x1, bg_x2, bg_casas,
-            "Atualização Bayesiana (Modelo Beta-Geométrica)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info
+            "Atualização Bayesiana (Modelo Beta-Geométrica)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info,
+            tipo_dist="beta", params_pri=(bg_a, bg_b), params_pos=(a_post, b_post),
+            modo_intervalo=bg_modo_ic,
+            callback_seq=cb_post_para_priori_conjugado, args_seq=("bg_a", a_post, "bg_b", b_post), key_btn_seq="btn_seq_bg"
         )
         if sub_bg:
             registrar_historico(
                 "3. Beta-Geométrica",
                 f"Priori: Beta({bg_a:g}; {bg_b:g}) | n={bg_n}, m={bg_m} | Intervalo: [{bg_x1:g}, {bg_x2:g}]",
-                res_bg, df_bg, info
+                res_bg, df_bg, info, rotulo=bg_rotulo
             )
 
 
@@ -753,10 +952,16 @@ with abas_principais[3]:
         bbn_n = c3.number_input("Total de Ensaios (n):", min_value=1, value=24, step=1, key="bbn_n")
         bbn_r = c4.number_input("Sucessos fixos (r):", min_value=1, value=9, step=1, key="bbn_r")
 
-        c5, c6, c7 = st.columns(3)
+        c5, c6, c7, c8, c9 = st.columns([1, 1, 1.3, 0.8, 1.1])
         bbn_x1 = input_decimal_01(c5, "Limite x1:", value=0.30, step=0.05, key="bbn_x1")
         bbn_x2 = input_decimal_01(c6, "Limite x2:", value=0.75, step=0.05, key="bbn_x2")
-        bbn_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bbn_casas")
+        bbn_modo_ic = c7.selectbox(
+            "Intervalo sombreado:",
+            ["Limites manuais (x1 e x2)", "IC 90% da Posteriori", "IC 95% da Posteriori", "IC 99% da Posteriori"],
+            key="bbn_modo_ic"
+        )
+        bbn_casas = c8.number_input("Casas dec.:", min_value=1, max_value=10, value=5, step=1, key="bbn_casas")
+        bbn_rotulo = c9.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q4", key="bbn_rot")
 
         sub_bbn = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
@@ -774,13 +979,16 @@ with abas_principais[3]:
         df_bbn, res_bbn = exibir_relatorio_conjugado(
             d_pri, d_pos, f"Beta({bbn_a:g}; {bbn_b:g})", f"Beta({a_post:g}; {b_post:g})",
             theta, bbn_x1, bbn_x2, bbn_casas,
-            "Atualização Bayesiana (Modelo Beta-Binomial Negativa)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info
+            "Atualização Bayesiana (Modelo Beta-Binomial Negativa)", r"$\theta$ (Probabilidade de Sucesso)", "θ", info,
+            tipo_dist="beta", params_pri=(bbn_a, bbn_b), params_pos=(a_post, b_post),
+            modo_intervalo=bbn_modo_ic,
+            callback_seq=cb_post_para_priori_conjugado, args_seq=("bbn_a", a_post, "bbn_b", b_post), key_btn_seq="btn_seq_bbn"
         )
         if sub_bbn:
             registrar_historico(
                 "4. Beta-Bin. Negativa",
                 f"Priori: Beta({bbn_a:g}; {bbn_b:g}) | n={bbn_n}, r={bbn_r} | Intervalo: [{bbn_x1:g}, {bbn_x2:g}]",
-                res_bbn, df_bbn, info
+                res_bbn, df_bbn, info, rotulo=bbn_rotulo
             )
 
 
@@ -794,15 +1002,34 @@ with abas_principais[4]:
         gp_param = c0.selectbox("Parametrização:", ["Escala (β)", "Taxa (β)"], key="gp_param")
         gp_alpha = c1.number_input("Priori alfa (α):", min_value=0.0001, value=3.0, step=0.5, format="%.4f", key="gp_a")
         gp_beta = c2.number_input("Priori beta (β):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="gp_b")
-        gp_n = c3.number_input("Períodos (n):", min_value=1, value=4, step=1, key="gp_n")
-        gp_soma = c4.number_input("Soma (Σx):", min_value=0, value=10, step=1, key="gp_soma")
+        gp_n_in = c3.number_input("Períodos (n):", min_value=1, value=4, step=1, key="gp_n")
+        gp_soma_in = c4.number_input("Soma (Σx):", min_value=0, value=10, step=1, key="gp_soma")
 
-        c5, c6, c7 = st.columns(3)
+        gp_raw = st.text_input(
+            "📥 Opcional — Colar contagens observadas (ex: 2, 4, 1, 3 — calcula 'n' e 'Σx' automaticamente):",
+            value="", key="gp_raw"
+        )
+
+        c5, c6, c7, c8, c9 = st.columns([1, 1, 1.3, 0.8, 1.1])
         gp_x1 = c5.number_input("Limite x1:", value=1.50, step=0.1, format="%.4f", key="gp_x1")
         gp_x2 = c6.number_input("Limite x2:", value=3.70, step=0.1, format="%.4f", key="gp_x2")
-        gp_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="gp_casas")
+        gp_modo_ic = c7.selectbox(
+            "Intervalo sombreado:",
+            ["Limites manuais (x1 e x2)", "IC 90% da Posteriori", "IC 95% da Posteriori", "IC 99% da Posteriori"],
+            key="gp_modo_ic"
+        )
+        gp_casas = c8.number_input("Casas dec.:", min_value=1, max_value=10, value=5, step=1, key="gp_casas")
+        gp_rotulo = c9.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q5", key="gp_rot")
 
         sub_gp = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+
+    amostra_gp = parse_amostra_bruta(gp_raw)
+    if amostra_gp is not None:
+        gp_n = len(amostra_gp)
+        gp_soma = int(round(sum(amostra_gp)))
+        st.caption(f"📥 Amostra lida: **n = {gp_n}** | **Σx = {gp_soma}** | Média amostral (x̄) = {np.mean(amostra_gp):.4g}")
+    else:
+        gp_n, gp_soma = gp_n_in, gp_soma_in
 
     a_post = gp_alpha + gp_soma
     if gp_param == "Escala (β)":
@@ -818,7 +1045,7 @@ with abas_principais[4]:
     d_pos = gamma_dist(a=a_post, scale=scale_pos)
 
     int_nucleo = (gamma_func(a_post) * (scale_pos ** a_post)) / (gamma_func(gp_alpha) * (scale_pri ** gp_alpha))
-    info = f"Parametrização por {rotulo_tipo} | Integral de Normalização (núcleo): {int_nucleo:.6f}"
+    info = f"Parametrização por {rotulo_tipo} | Média amostral x̄ = {gp_soma/gp_n:.4g} | Integral de Normalização (núcleo): {int_nucleo:.6f}"
     if gp_n == 1:
         int_completa = int_nucleo / gamma_func(gp_soma + 1)
         info += f" | Com 1/x!: {int_completa:.6f}"
@@ -829,13 +1056,16 @@ with abas_principais[4]:
     df_gp, res_gp = exibir_relatorio_conjugado(
         d_pri, d_pos, f"Gama({gp_alpha:g}; {gp_beta:g})", f"Gama({a_post:g}; {b_post:.6f})",
         lambda_vals, gp_x1, gp_x2, gp_casas,
-        "Atualização Bayesiana (Modelo Gama-Poisson)", r"$\lambda$ (Taxa de Ocorrência)", "λ", info
+        "Atualização Bayesiana (Modelo Gama-Poisson)", r"$\lambda$ (Taxa de Ocorrência)", "λ", info,
+        tipo_dist="gama", params_pri=(gp_alpha, scale_pri), params_pos=(a_post, scale_pos),
+        modo_intervalo=gp_modo_ic,
+        callback_seq=cb_post_para_priori_conjugado, args_seq=("gp_a", a_post, "gp_b", b_post), key_btn_seq="btn_seq_gp"
     )
     if sub_gp:
         registrar_historico(
             "5. Gama-Poisson",
             f"Priori: Gama({gp_alpha:g}; {gp_beta:g}) [{gp_param}] | n={gp_n}, Σx={gp_soma} | Intervalo: [{gp_x1:g}, {gp_x2:g}]",
-            res_gp, df_gp, info
+            res_gp, df_gp, info, rotulo=gp_rotulo
         )
 
 
@@ -849,15 +1079,34 @@ with abas_principais[5]:
         ge_param = c0.selectbox("Parametrização:", ["Escala (β)", "Taxa (β)"], key="ge_param")
         ge_alpha = c1.number_input("Priori alfa (α):", min_value=0.0001, value=3.0, step=0.5, format="%.4f", key="ge_a")
         ge_beta = c2.number_input("Priori beta (β):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="ge_b")
-        ge_n = c3.number_input("Observações (n):", min_value=1, value=5, step=1, key="ge_n")
-        ge_soma = c4.number_input("Soma dos tempos (Σx):", min_value=0.0001, value=5.0, step=0.5, format="%.4f", key="ge_soma")
+        ge_n_in = c3.number_input("Observações (n):", min_value=1, value=5, step=1, key="ge_n")
+        ge_soma_in = c4.number_input("Soma dos tempos (Σx):", min_value=0.0001, value=5.0, step=0.5, format="%.4f", key="ge_soma")
 
-        c5, c6, c7 = st.columns(3)
+        ge_raw = st.text_input(
+            "📥 Opcional — Colar tempos observados (ex: 0.8, 1.2, 0.5, 1.5, 1.0 — calcula 'n' e 'Σx' automaticamente):",
+            value="", key="ge_raw"
+        )
+
+        c5, c6, c7, c8, c9 = st.columns([1, 1, 1.3, 0.8, 1.1])
         ge_x1 = c5.number_input("Limite x1:", value=0.70, step=0.1, format="%.4f", key="ge_x1")
         ge_x2 = c6.number_input("Limite x2:", value=1.60, step=0.1, format="%.4f", key="ge_x2")
-        ge_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="ge_casas")
+        ge_modo_ic = c7.selectbox(
+            "Intervalo sombreado:",
+            ["Limites manuais (x1 e x2)", "IC 90% da Posteriori", "IC 95% da Posteriori", "IC 99% da Posteriori"],
+            key="ge_modo_ic"
+        )
+        ge_casas = c8.number_input("Casas dec.:", min_value=1, max_value=10, value=5, step=1, key="ge_casas")
+        ge_rotulo = c9.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q6", key="ge_rot")
 
         sub_ge = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
+
+    amostra_ge = parse_amostra_bruta(ge_raw)
+    if amostra_ge is not None:
+        ge_n = len(amostra_ge)
+        ge_soma = float(sum(amostra_ge))
+        st.caption(f"📥 Amostra lida: **n = {ge_n}** | **Σx = {ge_soma:.4g}** | Tempo médio (x̄) = {np.mean(amostra_ge):.4g}")
+    else:
+        ge_n, ge_soma = ge_n_in, ge_soma_in
 
     a_post = ge_alpha + ge_n
     if ge_param == "Escala (β)":
@@ -873,7 +1122,7 @@ with abas_principais[5]:
     d_pos = gamma_dist(a=a_post, scale=scale_pos)
 
     int_norm = (gamma_func(a_post) * (scale_pos ** a_post)) / (gamma_func(ge_alpha) * (scale_pri ** ge_alpha))
-    info = f"Parametrização por {rotulo_tipo} | Integral de Normalização: {int_norm:.6f}"
+    info = f"Parametrização por {rotulo_tipo} | Tempo médio amostral x̄ = {ge_soma/ge_n:.4g} | Integral de Normalização: {int_norm:.6f}"
 
     limite_sup = max(d_pri.ppf(0.995), d_pos.ppf(0.995), ge_x1 * 1.2, ge_x2 * 1.2, 0.1)
     lambda_vals = np.linspace(0, limite_sup, 500)
@@ -881,18 +1130,21 @@ with abas_principais[5]:
     df_ge, res_ge = exibir_relatorio_conjugado(
         d_pri, d_pos, f"Gama({ge_alpha:g}; {ge_beta:g})", f"Gama({a_post:g}; {b_post:.6f})",
         lambda_vals, ge_x1, ge_x2, ge_casas,
-        "Atualização Bayesiana (Modelo Gama-Exponencial)", r"$\lambda$ (Taxa de Falha / Tempo)", "λ", info
+        "Atualização Bayesiana (Modelo Gama-Exponencial)", r"$\lambda$ (Taxa de Falha / Tempo)", "λ", info,
+        tipo_dist="gama", params_pri=(ge_alpha, scale_pri), params_pos=(a_post, scale_pos),
+        modo_intervalo=ge_modo_ic,
+        callback_seq=cb_post_para_priori_conjugado, args_seq=("ge_a", a_post, "ge_b", b_post), key_btn_seq="btn_seq_ge"
     )
     if sub_ge:
         registrar_historico(
             "6. Gama-Exponencial",
             f"Priori: Gama({ge_alpha:g}; {ge_beta:g}) [{ge_param}] | n={ge_n}, Σx={ge_soma:g} | Intervalo: [{ge_x1:g}, {ge_x2:g}]",
-            res_ge, df_ge, info
+            res_ge, df_ge, info, rotulo=ge_rotulo
         )
 
 
 # ==============================================================================
-# ABA 7: EXPLORADOR DE DISTRIBUIÇÕES (ESTATÍSTICA CLÁSSICA)
+# ABA 7: EXPLORADOR DE DISTRIBUIÇÕES (COM CALCULADORA INVERSA DE QUANTIS)
 # ==============================================================================
 with abas_principais[6]:
     st.subheader("Explorador de Distribuições de Probabilidade")
@@ -1011,14 +1263,16 @@ with abas_principais[6]:
             nome_dist = f"Cauchy(x0={loc_c:g}, γ={sc_c:g})"
             suporte_min, suporte_max = loc_c - 6 * sc_c, loc_c + 6 * sc_c
 
-        cx1, cx2, ccas, cnot = st.columns([1, 1, 1, 1])
+        cx1, cx2, cpq, ccas, cnot = st.columns([1, 1, 1.1, 0.8, 1])
         if dist_escolhida == "Beta":
             x1_exp = input_decimal_01(cx1, "Valor x1:", value=0.25, step=0.05, key="exp_beta_x1")
             x2_exp = input_decimal_01(cx2, "Valor x2:", value=0.62, step=0.05, key="exp_beta_x2")
         else:
             x1_exp = cx1.number_input("Valor x1:", value=3.0, step=0.1, format="%.4f", key="exp_x1")
             x2_exp = cx2.number_input("Valor x2:", value=7.0, step=0.1, format="%.4f", key="exp_x2")
-        casas_exp = ccas.number_input("Casas decimais:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
+
+        p_quantil = input_decimal_01(cpq, "Prob. p/ Quantil (p):", value=0.95, min_value=0.0001, step=0.01, key="exp_pq")
+        casas_exp = ccas.number_input("Casas dec.:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
         notacao_exp = cnot.checkbox("Notação científica", value=False)
 
         sub_exp = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
@@ -1046,10 +1300,15 @@ with abas_principais[6]:
         lbl_igual = "f({}) [Densidade]"
 
     media_e, var_e, dp_e = dist.mean(), dist.var(), dist.std()
+    p_q_clip = min(max(p_quantil, 1e-6), 1.0 - 1e-6)
+    q_esq = dist.ppf(p_q_clip)
+    q_dir = dist.isf(p_q_clip)
+    q_central_inf = dist.ppf((1.0 - p_q_clip) / 2.0)
+    q_central_sup = dist.ppf(1.0 - (1.0 - p_q_clip) / 2.0)
 
-    col_info, col_graf_exp = st.columns([1, 1.4])
+    col_info, col_graf_exp = st.columns([1.05, 1.35])
     with col_info:
-        st.markdown("##### 📌 Probabilidades & Estatísticas")
+        st.markdown("##### 📌 Probabilidades, Quantis & Estatísticas")
         linhas_exp = [
             [lbl_igual.format(f"{x1_exp:g}"), formato_exp.format(prob_igual_x1)],
             [f"P(X < {x1_exp:g})", formato_exp.format(prob_menor_x1)],
@@ -1061,8 +1320,12 @@ with abas_principais[6]:
             [f"P(X > {x2_exp:g})", formato_exp.format(dist.sf(x2_exp))],
             [f"P({a_exp:g} <= X <= {b_exp:g})", formato_exp.format(prob_interv_exp)],
             ["Média E[X]", formato_exp.format(media_e) if not np.isnan(media_e) else "Indefinida"],
+            ["Mediana (Quantil 50%)", formato_exp.format(dist.ppf(0.5))],
             ["Variância Var[X]", formato_exp.format(var_e) if not np.isnan(var_e) else "Indefinida"],
-            ["Desvio Padrão DP[X]", formato_exp.format(dp_e) if not np.isnan(dp_e) else "Indefinida"]
+            ["Desvio Padrão DP[X]", formato_exp.format(dp_e) if not np.isnan(dp_e) else "Indefinida"],
+            [f"Quantil Cauda Esq. [P(X <= q) = {p_q_clip:g}]", formato_exp.format(q_esq)],
+            [f"Quantil Cauda Dir. [P(X > q) = {p_q_clip:g}]", formato_exp.format(q_dir)],
+            [f"Intervalo Central ({p_q_clip*100:.2f}%)", f"[{formato_exp.format(q_central_inf)}; {formato_exp.format(q_central_sup)}]"]
         ]
         df_exp = pd.DataFrame(linhas_exp, columns=["Medida", "Valor"])
         st.table(df_exp.set_index("Medida"))
@@ -1116,7 +1379,7 @@ with abas_principais[6]:
 
 
 # ==============================================================================
-# ABA 8: HISTÓRICO DA CALCULADORA
+# ABA 8: HISTÓRICO DA CALCULADORA (COM EXPORTAÇÃO CSV)
 # ==============================================================================
 with abas_principais[7]:
     st.subheader("📜 Histórico de Cálculos da Sessão")
@@ -1127,17 +1390,11 @@ with abas_principais[7]:
     if not hist:
         st.info("Nenhum cálculo salvo ainda. Vá até qualquer uma das abas e clique em **'🔄 Calcular / Atualizar'** para registrar seus cálculos.")
     else:
-        col_f1, col_f2, col_del_all = st.columns([1.8, 1.4, 1.2])
+        col_f1, col_f2, col_csv, col_del_all = st.columns([1.6, 1.3, 1.1, 1.1])
 
         abas_disponiveis = ["Todas"] + sorted(list({item["aba"] for item in hist}))
         filtro_aba = col_f1.selectbox("Filtrar por Modelo / Aba:", abas_disponiveis)
         ordem_hist = col_f2.selectbox("Ordenação:", ["Mais recentes primeiro", "Mais antigos primeiro"])
-
-        col_del_all.write("")
-        col_del_all.write("")
-        if col_del_all.button("🗑️ Deletar Todo o Histórico", type="primary", use_container_width=True):
-            st.session_state["historico_calculos"] = []
-            st.rerun()
 
         hist_filtrado = [
             item for item in hist
@@ -1146,17 +1403,35 @@ with abas_principais[7]:
         if ordem_hist == "Mais recentes primeiro":
             hist_filtrado = list(reversed(hist_filtrado))
 
+        df_resumo_hist = pd.DataFrame([
+            {
+                "#": item["id"],
+                "Hora": item["hora"],
+                "Aba / Modelo": item["aba"],
+                "Parâmetros Utilizados": item["parametros"],
+                "Resultado Principal": item["resultado"]
+            }
+            for item in hist_filtrado
+        ])
+
+        col_csv.write("")
+        col_csv.write("")
+        csv_bytes = df_resumo_hist.to_csv(index=False).encode("utf-8-sig")
+        col_csv.download_button(
+            "📥 Baixar CSV",
+            data=csv_bytes,
+            file_name="historico_bayeslab.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+        col_del_all.write("")
+        col_del_all.write("")
+        if col_del_all.button("🗑️ Deletar Tudo", type="primary", use_container_width=True):
+            st.session_state["historico_calculos"] = []
+            st.rerun()
+
         with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico", expanded=True):
-            df_resumo_hist = pd.DataFrame([
-                {
-                    "#": item["id"],
-                    "Hora": item["hora"],
-                    "Aba / Modelo": item["aba"],
-                    "Parâmetros Utilizados": item["parametros"],
-                    "Resultado Principal": item["resultado"]
-                }
-                for item in hist_filtrado
-            ])
             st.dataframe(df_resumo_hist, use_container_width=True, hide_index=True)
 
         st.markdown("##### 🗂️ Detalhes de Cada Cálculo")
