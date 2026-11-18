@@ -30,6 +30,10 @@ if "contador_historico" not in st.session_state:
     st.session_state["contador_historico"] = 0
 if "hist_form_ver" not in st.session_state:
     st.session_state["hist_form_ver"] = 0
+if "aba_alvo_jump" not in st.session_state:
+    st.session_state["aba_alvo_jump"] = None
+if "aviso_carregado" not in st.session_state:
+    st.session_state["aviso_carregado"] = ""
 
 
 def renumerar_historico():
@@ -156,10 +160,58 @@ def atualizar_rotulo_item(item, novo_rotulo):
     item["aba"] = f"{aba_base} [{rot}]" if rot else aba_base
 
 
+def extrair_snapshot_fallback(item):
+    """Reconstrói parâmetros de itens antigos da sessão caso não tenham snapshot salvo."""
+    aba_b = item.get("aba_base", item.get("aba", ""))
+    params_str = item.get("parametros", "")
+    snap = {}
+    aba_idx = 0
+
+    if aba_b.startswith("1."):
+        aba_idx = 0
+        m_ev = re.search(r"Evento:\s*([^|]+)", params_str)
+        if m_ev:
+            snap["disc_nome_evento"] = m_ev.group(1).strip()
+        pares = re.findall(r"([^,|]+):\s*Pri=([\d.]+),\s*Ver=([\d.]+)", params_str)
+        if pares:
+            snap["disc_num_estados"] = len(pares)
+            snap["disc_modo_veros"] = "Direta — Valor único P(B | Ai)"
+            for i, (nome_h, pri_s, ver_s) in enumerate(pares):
+                nome_limpo = nome_h.split("|")[-1].strip()
+                snap[f"disc_nome_{i}"] = "" if nome_limpo == f"A{i+1}" else nome_limpo
+                snap[f"disc_p_{i}"] = float(pri_s)
+                snap[f"disc_v_{i}"] = float(ver_s)
+        snap["disc_rotulo"] = item.get("rotulo", "")
+    return aba_idx, snap
+
+
+def cb_carregar_simulacao_na_aba(item_uid):
+    """
+    Carrega os parâmetros de um cálculo do histórico para os campos da respectiva aba
+    e agenda a troca de aba no frontend sem registrar um novo cálculo.
+    """
+    for item in st.session_state["historico_calculos"]:
+        if item["uid"] == item_uid:
+            snap = item.get("snapshot")
+            aba_idx = item.get("aba_idx")
+            if not snap or aba_idx is None:
+                aba_idx, snap = extrair_snapshot_fallback(item)
+
+            for k, v in snap.items():
+                st.session_state[k] = v
+
+            st.session_state["aba_alvo_jump"] = int(aba_idx)
+            st.session_state["aviso_carregado"] = (
+                f"📥 Parâmetros do **Cálculo #{item['id']} ({item['aba']})** carregados nos campos abaixo. "
+                f"Altere o que desejar na caixa e clique em **'🔄 Calcular / Atualizar'** apenas se quiser rodar uma nova simulação."
+            )
+            break
+
+
 # Script JS invisível:
 # 1) Seleciona automaticamente todo o texto ao focar/clicar em qualquer input numérico
 # 2) Puxa inteiros digitados (ex: "27" -> "0.27", "05" -> "0.05") instantaneamente no Tab, Enter ou clique fora
-# 3) Abre o campo de renomear rótulo no Histórico ao clicar no botão ✏️ ao lado do nome atual (sem rerun)
+# 3) Abre o campo de renomear rótulo no Histórico ao clicar em ✏️ e FECHA de volta ao normal ao clicar fora
 components.html(
     """
     <script>
@@ -198,6 +250,31 @@ components.html(
             }
         }
 
+        function fecharRenameSeAberto(inputEl) {
+            if (!inputEl || inputEl.tagName !== 'INPUT' || inputEl.type !== 'text') return;
+            const inputContainer = inputEl.closest('.element-container, [data-testid="stElementContainer"]');
+            if (!inputContainer || !inputContainer.previousElementSibling) return;
+
+            const viewDiv = inputContainer.previousElementSibling.querySelector('.rotulo-view.editando');
+            if (!viewDiv) return;
+
+            // Aguarda o onBlur do React registrar o valor no buffer do formulário e volta o rótulo ao normal
+            setTimeout(function() {
+                const spanTxt = viewDiv.querySelector('.rotulo-texto');
+                if (spanTxt) {
+                    const novoVal = (inputEl.value || '').trim();
+                    const originalVal = viewDiv.getAttribute('data-orig') || '';
+                    spanTxt.textContent = novoVal ? novoVal : '—';
+                    if (novoVal !== originalVal) {
+                        spanTxt.style.color = '#e67e22';
+                    } else {
+                        spanTxt.style.color = novoVal ? 'inherit' : '#888';
+                    }
+                }
+                viewDiv.classList.remove('editando');
+            }, 35);
+        }
+
         function onFocusIn(e) {
             const el = e.target;
             if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.hasAttribute('step'))) {
@@ -208,8 +285,20 @@ components.html(
         }
 
         function onKeyDown(e) {
+            const el = e.target;
             if (e.key === 'Enter' || e.key === 'Tab') {
-                converterSeInteiro(e.target);
+                converterSeInteiro(el);
+            }
+            if ((e.key === 'Escape' || e.key === 'Enter') && el && el.tagName === 'INPUT' && el.type === 'text') {
+                const inputContainer = el.closest('.element-container, [data-testid="stElementContainer"]');
+                if (inputContainer && inputContainer.previousElementSibling &&
+                    inputContainer.previousElementSibling.querySelector('.rotulo-view.editando')) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                    el.blur();
+                }
             }
         }
 
@@ -219,6 +308,7 @@ components.html(
             setTimeout(function() {
                 converterSeInteiro(el);
             }, 10);
+            fecharRenameSeAberto(el);
         }
 
         function onClick(e) {
@@ -262,8 +352,29 @@ components.html(
     height=0
 )
 
+# Se o usuário clicou em "🔎 Carregar parâmetros na aba", muda automaticamente para a aba da simulação
+if st.session_state.get("aba_alvo_jump") is not None:
+    _idx_jump = int(st.session_state["aba_alvo_jump"])
+    st.session_state["aba_alvo_jump"] = None
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const doc = window.parent.document;
+            const tabs = doc.querySelectorAll('button[data-baseweb="tab"]');
+            if (tabs && tabs.length > {_idx_jump}) {{
+                tabs[{_idx_jump}].click();
+                window.parent.scrollTo({{ top: 0, behavior: 'smooth' }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0
+    )
 
-def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, detalhes_extras="", rotulo=""):
+
+def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None,
+                        detalhes_extras="", rotulo="", aba_idx=0, snapshot=None):
     """Salva um cálculo realizado no histórico da sessão no fuso de Brasília (UTC-3)."""
     novo_id = len(st.session_state["historico_calculos"]) + 1
     agora = datetime.now(FUSO_BR).strftime("%H:%M:%S")
@@ -275,13 +386,15 @@ def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, de
         "id": novo_id,
         "hora": agora,
         "fuso_corrigido": True,
+        "aba_idx": aba_idx,
         "aba_base": aba,
         "rotulo": rot_limpo,
         "aba": aba_exibicao,
         "parametros": resumo_params,
         "resultado": resumo_resultado,
         "detalhes": detalhes_extras,
-        "tabela": df_tabela.copy() if df_tabela is not None else None
+        "tabela": df_tabela.copy() if df_tabela is not None else None,
+        "snapshot": dict(snapshot) if snapshot is not None else {}
     }
     st.session_state["historico_calculos"].append(item)
     renumerar_historico()
@@ -289,6 +402,10 @@ def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, de
 
 
 st.title("📊 Suíte de Estatística Bayesiana & Distribuições")
+
+if st.session_state.get("aviso_carregado"):
+    st.info(st.session_state["aviso_carregado"])
+    st.session_state["aviso_carregado"] = ""
 
 # ==============================================================================
 # FUNÇÃO PADRÃO DE RELATÓRIO E GRÁFICO PARA MODELOS CONJUGADOS CONTÍNUOS
@@ -433,57 +550,62 @@ abas_principais = st.tabs([
 ])
 
 # ==============================================================================
-# ABA 1: TEOREMA DE BAYES DISCRETO (COM RAMIFICAÇÕES E AUTOCOMPLETAR)
+# ABA 1: TEOREMA DE BAYES DISCRETO (COM TERMOS GENÉRICOS NEUTROS)
 # ==============================================================================
 with abas_principais[0]:
     st.subheader("Teorema de Bayes - Atualização de Probabilidades (Discreto)")
 
     cfg1, cfg2, cfg3 = st.columns([1.1, 2.2, 1.2])
-    num_estados = cfg1.number_input("Nº Opções (Hipóteses):", min_value=2, max_value=10, value=2, step=1)
+    num_estados = cfg1.number_input(
+        "Nº Opções (Hipóteses):", min_value=2, max_value=10, value=2, step=1, key="disc_num_estados"
+    )
     modo_veros = cfg2.selectbox(
         "Estrutura da Verossimilhança (Diagrama de Árvore):",
         [
             "Direta — Valor único P(B | Ai)",
             "Sub-ramificações Paralelas — Soma: ∑ P(Sub | Ai) · P(B | Ai, Sub)",
             "Etapas em Série — Produto: ∏ P(Etapa | Ai)"
-        ]
+        ],
+        key="disc_modo_veros"
     )
     if modo_veros != "Direta — Valor único P(B | Ai)":
         num_subramos = cfg3.number_input(
-            "Nº Sub-ramos / Etapas:", min_value=2, max_value=6, value=2, step=1
+            "Nº Sub-ramos / Etapas:", min_value=2, max_value=6, value=2, step=1, key="disc_num_subramos"
         )
     else:
         num_subramos = 1
 
     with st.form("form_bayes_discreto"):
         c2, c3, c4, c5, c6 = st.columns([1.4, 1.4, 1.0, 0.9, 1.2])
-        nome_evento = c2.text_input("Evento (Evidência - B):", value="Recessão")
-        termo_a = c3.text_input("Termo p/ A (ex: Premissa):", value="Premissa")
-        simbolo_a = c4.text_input("Símbolo p/ A (ex: A, H):", value="A")
-        casas_disc = c5.number_input("Casas decimais:", min_value=2, max_value=10, value=4, step=1)
-        rotulo_disc = c6.text_input("🏷️ Rótulo (opcional):", value="", placeholder="Ex: Questão 1")
+        nome_evento = c2.text_input("Evento (Evidência - B):", value="B", key="disc_nome_evento")
+        termo_a = c3.text_input("Termo p/ A (ex: Hipótese):", value="Hipótese", key="disc_termo_a")
+        simbolo_a = c4.text_input("Símbolo p/ A (ex: A, H):", value="A", key="disc_simbolo_a")
+        casas_disc = c5.number_input("Casas decimais:", min_value=2, max_value=10, value=4, step=1, key="disc_casas")
+        rotulo_disc = c6.text_input("🏷️ Rótulo (opcional):", value="", placeholder="Ex: 1", key="disc_rotulo")
 
         qol_c1, qol_c2 = st.columns(2)
         auto_comp_priori = qol_c1.checkbox(
             "✨ Autocompletar opção deixada em 0,0000 com o complementar (1 - ∑P)",
             value=True,
+            key="disc_auto_comp",
             help="Se exatamente uma hipótese (ou um sub-ramo) for deixada com probabilidade 0 e as demais somarem menos que 1, preenche automaticamente o valor restante."
         )
         auto_norm_priori = qol_c2.checkbox(
             "⚖️ Normalizar Prioris automaticamente se a soma for diferente de 1",
-            value=False
+            value=False,
+            key="disc_auto_norm"
         )
 
         ev = nome_evento.strip() if nome_evento.strip() else "B"
-        t_a = termo_a.strip() if termo_a.strip() else "Opção"
+        t_a = termo_a.strip() if termo_a.strip() else "Hipótese"
         s_a = simbolo_a.strip() if simbolo_a.strip() else "A"
 
         st.markdown("##### Defina as Probabilidades a Priori e as Verossimilhanças:")
         estados_raw = []
 
         for i in range(num_estados):
-            padrao_p = 0.80 if i == 0 else (0.20 if i == 1 else 0.0)
-            padrao_c = 0.05 if i == 0 else (0.50 if i == 1 else 0.0)
+            padrao_p = 0.50 if i < 2 else 0.0
+            padrao_c = 0.50 if i < 2 else 0.0
 
             if modo_veros == "Direta — Valor único P(B | Ai)":
                 col_n, col_p, col_v = st.columns([1.5, 1.5, 1.5])
@@ -517,7 +639,7 @@ with abas_principais[0]:
                 for j in range(num_subramos):
                     cs_nome, cs_prob, cs_ver = st.columns([1.4, 1.5, 1.5])
                     padrao_sub_p = round(1.0 / num_subramos, 4) if j < num_subramos - 1 else round(1.0 - round(1.0 / num_subramos, 4) * (num_subramos - 1), 4)
-                    padrao_sub_v = min(1.0, round(padrao_c * (0.8 + 0.4 * j), 4))
+                    padrao_sub_v = 0.50
 
                     sub_nome = cs_nome.text_input(
                         f"↳ Sub-ramo #{j+1} de {s_a}{i+1}:",
@@ -533,6 +655,7 @@ with abas_principais[0]:
                     )
                     subramos_i.append({
                         "nome": sub_nome.strip() if sub_nome.strip() else f"C{i+1}.{j+1}",
+                        "nome_raw": sub_nome,
                         "p_sub": sub_p,
                         "p_ev_sub": sub_v
                     })
@@ -558,7 +681,7 @@ with abas_principais[0]:
                 etapas_i = []
                 prod_v = 1.0
                 for j in range(num_subramos):
-                    padrao_et = round(padrao_c ** (1.0 / num_subramos), 4) if padrao_c > 0 else 0.5
+                    padrao_et = 0.50
                     val_et = input_decimal_01(
                         cols_etapas[j], f"↳ Etapa #{j+1} P(E{j+1} | {s_a}{i+1}):",
                         value=float(padrao_et), key=f"et_v_{i}_{j}"
@@ -696,7 +819,7 @@ with abas_principais[0]:
 
         df_disc = pd.DataFrame(
             tabela_dados,
-            columns=[t_a, f"P({t_a}) [Priori]", f"P({ev} | {t_a}) [Verossim.]", "Conjunta", f"P({t_a} | {ev}) [Posteriori]"]
+            columns=[t_a, f"P({s_a}i) [Priori]", f"P({ev} | {s_a}i) [Verossim.]", "Conjunta", f"P({s_a}i | {ev}) [Posteriori]"]
         )
 
         with sub_disc[0]:
@@ -723,9 +846,9 @@ with abas_principais[0]:
                 df_sub = pd.DataFrame(
                     linhas_sub,
                     columns=[
-                        t_a, "Sub-ramo (C)", f"P({t_a})", f"P(C | {t_a})",
-                        f"P({ev} | {t_a} ∩ C)", f"Parcela em P({ev} | {t_a})",
-                        f"Conjunta P({t_a} ∩ C ∩ {ev})", f"Posteriori P({t_a} ∩ C | {ev})"
+                        t_a, "Sub-ramo (C)", f"P({s_a}i)", f"P(C | {s_a}i)",
+                        f"P({ev} | {s_a}i ∩ C)", f"Parcela em P({ev} | {s_a}i)",
+                        f"Conjunta P({s_a}i ∩ C ∩ {ev})", f"Posteriori P({s_a}i ∩ C | {ev})"
                     ]
                 )
                 st.dataframe(df_sub, use_container_width=True, hide_index=True)
@@ -742,7 +865,7 @@ with abas_principais[0]:
                     ])
                 df_et = pd.DataFrame(
                     linhas_et,
-                    columns=[t_a, "Produto das Etapas", f"P({ev} | {t_a}) Resultante"]
+                    columns=[t_a, "Produto das Etapas", f"P({ev} | {s_a}i) Resultante"]
                 )
                 st.table(df_et.set_index(t_a))
 
@@ -896,6 +1019,32 @@ with abas_principais[0]:
                 plt.close(fig_tree)
 
         if sub_bayes:
+            snap_bayes = {
+                "disc_num_estados": num_estados,
+                "disc_modo_veros": modo_veros,
+                "disc_num_subramos": num_subramos,
+                "disc_nome_evento": nome_evento,
+                "disc_termo_a": termo_a,
+                "disc_simbolo_a": simbolo_a,
+                "disc_casas": casas_disc,
+                "disc_rotulo": rotulo_disc,
+                "disc_auto_comp": auto_comp_priori,
+                "disc_auto_norm": auto_norm_priori,
+            }
+            for i, it in enumerate(estados_raw):
+                snap_bayes[f"disc_nome_{i}"] = it["nome_input"]
+                snap_bayes[f"disc_p_{i}"] = float(it["priori"])
+                if modo_veros == "Direta — Valor único P(B | Ai)":
+                    snap_bayes[f"disc_v_{i}"] = float(it["veros_direta"])
+                elif modo_veros.startswith("Sub-ramificações Paralelas"):
+                    for j, s in enumerate(it["subramos"]):
+                        snap_bayes[f"sub_n_{i}_{j}"] = s.get("nome_raw", "")
+                        snap_bayes[f"sub_p_{i}_{j}"] = float(s["p_sub"])
+                        snap_bayes[f"sub_v_{i}_{j}"] = float(s["p_ev_sub"])
+                else:
+                    for j, s in enumerate(it["subramos"]):
+                        snap_bayes[f"et_v_{i}_{j}"] = float(s["p_etapa"])
+
             resumo_p = (
                 f"Evento: {ev} | Modo: {modo_veros.split('—')[0].strip()} | "
                 + ", ".join(f"{n}: Pri={estados_dict[n]['priori']:.4g}, Ver={estados_dict[n]['veros']:.4g}" for n in nomes_lista)
@@ -907,7 +1056,10 @@ with abas_principais[0]:
                     for n in nomes_lista
                 )
             )
-            registrar_historico("1. Teorema de Bayes", resumo_p, resumo_r, df_disc, rotulo=rotulo_disc)
+            registrar_historico(
+                "1. Teorema de Bayes", resumo_p, resumo_r, df_disc,
+                rotulo=rotulo_disc, aba_idx=0, snapshot=snap_bayes
+            )
 
 
 # ==============================================================================
@@ -960,10 +1112,15 @@ with abas_principais[1]:
             callback_seq=cb_post_para_priori_conjugado, args_seq=("bb_a", a_post, "bb_b", b_post), key_btn_seq="btn_seq_bb"
         )
         if sub_bb:
+            snap_bb = {
+                "bb_a": bb_a, "bb_b": bb_b, "bb_n": bb_n, "bb_k": bb_k,
+                "bb_x1": bb_x1, "bb_x2": bb_x2, "bb_modo_ic": bb_modo_ic,
+                "bb_casas": bb_casas, "bb_rot": bb_rotulo
+            }
             registrar_historico(
                 "2. Beta-Binomial",
                 f"Priori: Beta({bb_a:g}; {bb_b:g}) | n={bb_n}, k={bb_k} | Intervalo: [{bb_x1:g}, {bb_x2:g}]",
-                res_bb, df_bb, info, rotulo=bb_rotulo
+                res_bb, df_bb, info, rotulo=bb_rotulo, aba_idx=1, snapshot=snap_bb
             )
 
 
@@ -1025,10 +1182,15 @@ with abas_principais[2]:
             callback_seq=cb_post_para_priori_conjugado, args_seq=("bg_a", a_post, "bg_b", b_post), key_btn_seq="btn_seq_bg"
         )
         if sub_bg:
+            snap_bg = {
+                "bg_a": bg_a, "bg_b": bg_b, "bg_n": bg_n_in, "bg_m": bg_m_in,
+                "bg_raw": bg_raw, "bg_x1": bg_x1, "bg_x2": bg_x2,
+                "bg_modo_ic": bg_modo_ic, "bg_casas": bg_casas, "bg_rot": bg_rotulo
+            }
             registrar_historico(
                 "3. Beta-Geométrica",
                 f"Priori: Beta({bg_a:g}; {bg_b:g}) | n={bg_n}, m={bg_m} | Intervalo: [{bg_x1:g}, {bg_x2:g}]",
-                res_bg, df_bg, info, rotulo=bg_rotulo
+                res_bg, df_bg, info, rotulo=bg_rotulo, aba_idx=2, snapshot=snap_bg
             )
 
 
@@ -1077,10 +1239,15 @@ with abas_principais[3]:
             callback_seq=cb_post_para_priori_conjugado, args_seq=("bbn_a", a_post, "bbn_b", b_post), key_btn_seq="btn_seq_bbn"
         )
         if sub_bbn:
+            snap_bbn = {
+                "bbn_a": bbn_a, "bbn_b": bbn_b, "bbn_n": bbn_n, "bbn_r": bbn_r,
+                "bbn_x1": bbn_x1, "bbn_x2": bbn_x2, "bbn_modo_ic": bbn_modo_ic,
+                "bbn_casas": bbn_casas, "bbn_rot": bbn_rotulo
+            }
             registrar_historico(
                 "4. Beta-Bin. Negativa",
                 f"Priori: Beta({bbn_a:g}; {bbn_b:g}) | n={bbn_n}, r={bbn_r} | Intervalo: [{bbn_x1:g}, {bbn_x2:g}]",
-                res_bbn, df_bbn, info, rotulo=bbn_rotulo
+                res_bbn, df_bbn, info, rotulo=bbn_rotulo, aba_idx=3, snapshot=snap_bbn
             )
 
 
@@ -1154,10 +1321,16 @@ with abas_principais[4]:
         callback_seq=cb_post_para_priori_conjugado, args_seq=("gp_a", a_post, "gp_b", b_post), key_btn_seq="btn_seq_gp"
     )
     if sub_gp:
+        snap_gp = {
+            "gp_param": gp_param, "gp_a": gp_alpha, "gp_b": gp_beta,
+            "gp_n": gp_n_in, "gp_soma": gp_soma_in, "gp_raw": gp_raw,
+            "gp_x1": gp_x1, "gp_x2": gp_x2, "gp_modo_ic": gp_modo_ic,
+            "gp_casas": gp_casas, "gp_rot": gp_rotulo
+        }
         registrar_historico(
             "5. Gama-Poisson",
             f"Priori: Gama({gp_alpha:g}; {gp_beta:g}) [{gp_param}] | n={gp_n}, Σx={gp_soma} | Intervalo: [{gp_x1:g}, {gp_x2:g}]",
-            res_gp, df_gp, info, rotulo=gp_rotulo
+            res_gp, df_gp, info, rotulo=gp_rotulo, aba_idx=4, snapshot=snap_gp
         )
 
 
@@ -1228,10 +1401,16 @@ with abas_principais[5]:
         callback_seq=cb_post_para_priori_conjugado, args_seq=("ge_a", a_post, "ge_b", b_post), key_btn_seq="btn_seq_ge"
     )
     if sub_ge:
+        snap_ge = {
+            "ge_param": ge_param, "ge_a": ge_alpha, "ge_b": ge_beta,
+            "ge_n": ge_n_in, "ge_soma": ge_soma_in, "ge_raw": ge_raw,
+            "ge_x1": ge_x1, "ge_x2": ge_x2, "ge_modo_ic": ge_modo_ic,
+            "ge_casas": ge_casas, "ge_rot": ge_rotulo
+        }
         registrar_historico(
             "6. Gama-Exponencial",
             f"Priori: Gama({ge_alpha:g}; {ge_beta:g}) [{ge_param}] | n={ge_n}, Σx={ge_soma:g} | Intervalo: [{ge_x1:g}, {ge_x2:g}]",
-            res_ge, df_ge, info, rotulo=ge_rotulo
+            res_ge, df_ge, info, rotulo=ge_rotulo, aba_idx=5, snapshot=snap_ge
         )
 
 
@@ -1247,58 +1426,65 @@ with abas_principais[6]:
             "Binomial", "Poisson", "Binomial Negativa", "Geométrica",
             "Normal", "Uniforme Contínua", "Exponencial", "Gama",
             "Beta", "Qui-quadrado", "t-Student", "F", "Cauchy"
-        ]
+        ],
+        key="exp_dist_escolhida"
     )
 
     is_discrete = False
     suporte_finito = False
+    snap_exp_params = {"exp_dist_escolhida": dist_escolhida}
 
     with st.form("form_explorador"):
         col_p1, col_p2 = st.columns(2)
 
         if dist_escolhida == "Binomial":
-            n_val = col_p1.number_input("n (Ensaios):", min_value=1, value=10, step=1)
+            n_val = col_p1.number_input("n (Ensaios):", min_value=1, value=10, step=1, key="exp_binom_n")
             p_val = input_decimal_01(col_p2, "p (Sucesso):", value=0.30, step=0.05, key="exp_binom_p")
             dist = binom(n=n_val, p=p_val)
             nome_dist = f"Binomial(n={n_val}, p={p_val:g})"
             is_discrete, suporte_finito = True, True
             suporte_min, suporte_max = 0, n_val
+            snap_exp_params.update({"exp_binom_n": n_val, "exp_binom_p": p_val})
 
         elif dist_escolhida == "Poisson":
-            lam_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=4.0, step=0.5, format="%.4f")
-            xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
+            lam_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=4.0, step=0.5, format="%.4f", key="exp_pois_lam")
+            xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1, key="exp_pois_xmax")
             dist = poisson(mu=lam_val)
             nome_dist = f"Poisson(λ={lam_val:g})"
             is_discrete = True
             suporte_min, suporte_max = 0, xmax_val
+            snap_exp_params.update({"exp_pois_lam": lam_val, "exp_pois_xmax": xmax_val})
 
         elif dist_escolhida == "Binomial Negativa":
-            r_val = col_p1.number_input("r (Sucessos):", min_value=1, value=5, step=1)
+            r_val = col_p1.number_input("r (Sucessos):", min_value=1, value=5, step=1, key="exp_nbinom_r")
             p_val = input_decimal_01(col_p2, "p (Sucesso):", value=0.30, min_value=0.0001, step=0.05, key="exp_nbinom_p")
-            xmax_val = st.number_input("x_max (Gráfico/Tabela):", min_value=1, value=25, step=1)
+            xmax_val = st.number_input("x_max (Gráfico/Tabela):", min_value=1, value=25, step=1, key="exp_nbinom_xmax")
             dist = nbinom(n=r_val, p=p_val)
             nome_dist = f"Binomial Negativa(r={r_val}, p={p_val:g})"
             is_discrete = True
             suporte_min, suporte_max = 0, xmax_val
+            snap_exp_params.update({"exp_nbinom_r": r_val, "exp_nbinom_p": p_val, "exp_nbinom_xmax": xmax_val})
 
         elif dist_escolhida == "Geométrica":
             p_val = input_decimal_01(col_p1, "p (Sucesso):", value=0.30, min_value=0.0001, step=0.05, key="exp_geom_p")
-            xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
+            xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1, key="exp_geom_xmax")
             dist = geom(p=p_val)
             nome_dist = f"Geométrica(p={p_val:g})"
             is_discrete = True
             suporte_min, suporte_max = 1, max(1, xmax_val)
+            snap_exp_params.update({"exp_geom_p": p_val, "exp_geom_xmax": xmax_val})
 
         elif dist_escolhida == "Normal":
-            mu_val = col_p1.number_input("μ (Média):", value=0.0, step=0.5, format="%.4f")
-            sigma_val = col_p2.number_input("σ (Desvio Padrão):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
+            mu_val = col_p1.number_input("μ (Média):", value=0.0, step=0.5, format="%.4f", key="exp_norm_mu")
+            sigma_val = col_p2.number_input("σ (Desvio Padrão):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="exp_norm_sig")
             dist = norm(loc=mu_val, scale=sigma_val)
             nome_dist = f"Normal(μ={mu_val:g}, σ={sigma_val:g})"
             suporte_min, suporte_max = mu_val - 4 * sigma_val, mu_val + 4 * sigma_val
+            snap_exp_params.update({"exp_norm_mu": mu_val, "exp_norm_sig": sigma_val})
 
         elif dist_escolhida == "Uniforme Contínua":
-            a_u = col_p1.number_input("a (Mínimo):", value=0.0, step=0.5, format="%.4f")
-            b_u = col_p2.number_input("b (Máximo):", value=10.0, step=0.5, format="%.4f")
+            a_u = col_p1.number_input("a (Mínimo):", value=0.0, step=0.5, format="%.4f", key="exp_unif_a")
+            b_u = col_p2.number_input("b (Máximo):", value=10.0, step=0.5, format="%.4f", key="exp_unif_b")
             a_val, b_val = min(a_u, b_u), max(a_u, b_u)
             if a_val == b_val:
                 b_val += 0.0001
@@ -1307,66 +1493,83 @@ with abas_principais[6]:
             suporte_finito = True
             interv = b_val - a_val
             suporte_min, suporte_max = a_val - 0.2 * interv, b_val + 0.2 * interv
+            snap_exp_params.update({"exp_unif_a": a_u, "exp_unif_b": b_u})
 
         elif dist_escolhida == "Exponencial":
-            taxa_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
+            taxa_val = col_p1.number_input("λ (Taxa):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="exp_expon_lam")
             dist = expon(scale=1.0 / taxa_val)
             nome_dist = f"Exponencial(λ={taxa_val:g})"
             suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+            snap_exp_params.update({"exp_expon_lam": taxa_val})
 
         elif dist_escolhida == "Gama":
-            a_g = col_p1.number_input("α (Forma):", min_value=0.0001, value=2.0, step=0.5, format="%.4f")
-            b_g = col_p2.number_input("β (Escala):", min_value=0.0001, value=2.0, step=0.2, format="%.4f")
+            a_g = col_p1.number_input("α (Forma):", min_value=0.0001, value=2.0, step=0.5, format="%.4f", key="exp_gama_a")
+            b_g = col_p2.number_input("β (Escala):", min_value=0.0001, value=2.0, step=0.2, format="%.4f", key="exp_gama_b")
             dist = gamma_dist(a=a_g, scale=b_g)
             nome_dist = f"Gama(α={a_g:g}, β={b_g:g})"
             suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+            snap_exp_params.update({"exp_gama_a": a_g, "exp_gama_b": b_g})
 
         elif dist_escolhida == "Beta":
-            a_b = col_p1.number_input("α (Forma 1):", min_value=0.0001, value=6.0, step=0.5, format="%.4f")
-            b_b = col_p2.number_input("β (Forma 2):", min_value=0.0001, value=9.0, step=0.5, format="%.4f")
+            a_b = col_p1.number_input("α (Forma 1):", min_value=0.0001, value=6.0, step=0.5, format="%.4f", key="exp_beta_a")
+            b_b = col_p2.number_input("β (Forma 2):", min_value=0.0001, value=9.0, step=0.5, format="%.4f", key="exp_beta_b")
             dist = beta_dist(a=a_b, b=b_b)
             nome_dist = f"Beta(α={a_b:g}, β={b_b:g})"
             suporte_finito = True
             suporte_min, suporte_max = 0.0, 1.0
+            snap_exp_params.update({"exp_beta_a": a_b, "exp_beta_b": b_b})
 
         elif dist_escolhida == "Qui-quadrado":
-            gl_q = col_p1.number_input("gl (ν):", min_value=0.0001, value=5.0, step=1.0, format="%.4f")
+            gl_q = col_p1.number_input("gl (ν):", min_value=0.0001, value=5.0, step=1.0, format="%.4f", key="exp_chi2_gl")
             dist = chi2(df=gl_q)
             nome_dist = f"Qui-quadrado(ν={gl_q:g})"
             suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+            snap_exp_params.update({"exp_chi2_gl": gl_q})
 
         elif dist_escolhida == "t-Student":
-            gl_t = col_p1.number_input("gl (ν):", min_value=0.0001, value=10.0, step=1.0, format="%.4f")
+            gl_t = col_p1.number_input("gl (ν):", min_value=0.0001, value=10.0, step=1.0, format="%.4f", key="exp_t_gl")
             dist = t_student(df=gl_t)
             nome_dist = f"t-Student(ν={gl_t:g})"
             suporte_min, suporte_max = dist.ppf(0.001), dist.ppf(0.999)
+            snap_exp_params.update({"exp_t_gl": gl_t})
 
         elif dist_escolhida == "F":
-            d1 = col_p1.number_input("gl1 (d1):", min_value=0.0001, value=5.0, step=1.0, format="%.4f")
-            d2 = col_p2.number_input("gl2 (d2):", min_value=0.0001, value=10.0, step=1.0, format="%.4f")
+            d1 = col_p1.number_input("gl1 (d1):", min_value=0.0001, value=5.0, step=1.0, format="%.4f", key="exp_f_d1")
+            d2 = col_p2.number_input("gl2 (d2):", min_value=0.0001, value=10.0, step=1.0, format="%.4f", key="exp_f_d2")
             dist = f_fisher(dfn=d1, dfd=d2)
             nome_dist = f"F(d1={d1:g}, d2={d2:g})"
             suporte_min, suporte_max = 0.0, dist.ppf(0.995)
+            snap_exp_params.update({"exp_f_d1": d1, "exp_f_d2": d2})
 
         elif dist_escolhida == "Cauchy":
-            loc_c = col_p1.number_input("x0 (Localização):", value=0.0, step=0.5, format="%.4f")
-            sc_c = col_p2.number_input("γ (Escala):", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
+            loc_c = col_p1.number_input("x0 (Localização):", value=0.0, step=0.5, format="%.4f", key="exp_cauchy_loc")
+            sc_c = col_p2.number_input("γ (Escala):", min_value=0.0001, value=1.0, step=0.1, format="%.4f", key="exp_cauchy_sc")
             dist = cauchy(loc=loc_c, scale=sc_c)
             nome_dist = f"Cauchy(x0={loc_c:g}, γ={sc_c:g})"
             suporte_min, suporte_max = loc_c - 6 * sc_c, loc_c + 6 * sc_c
+            snap_exp_params.update({"exp_cauchy_loc": loc_c, "exp_cauchy_sc": sc_c})
 
         cx1, cx2, cpq, ccas, cnot, crot = st.columns([1, 1, 1.1, 0.8, 0.9, 1])
         if dist_escolhida == "Beta":
             x1_exp = input_decimal_01(cx1, "Valor x1:", value=0.25, step=0.05, key="exp_beta_x1")
             x2_exp = input_decimal_01(cx2, "Valor x2:", value=0.62, step=0.05, key="exp_beta_x2")
+            snap_exp_params.update({"exp_beta_x1": x1_exp, "exp_beta_x2": x2_exp})
         else:
             x1_exp = cx1.number_input("Valor x1:", value=3.0, step=0.1, format="%.4f", key="exp_x1")
             x2_exp = cx2.number_input("Valor x2:", value=7.0, step=0.1, format="%.4f", key="exp_x2")
+            snap_exp_params.update({"exp_x1": x1_exp, "exp_x2": x2_exp})
 
         p_quantil = input_decimal_01(cpq, "Prob. p/ Quantil (p):", value=0.95, min_value=0.0001, step=0.01, key="exp_pq")
         casas_exp = ccas.number_input("Casas dec.:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
-        notacao_exp = cnot.checkbox("Notação cient.", value=False)
+        notacao_exp = cnot.checkbox("Notação cient.", value=False, key="exp_notacao")
         rotulo_exp = crot.text_input("🏷️ Rótulo:", value="", placeholder="Ex: Q7", key="exp_rot")
+
+        snap_exp_params.update({
+            "exp_pq": p_quantil,
+            "exp_casas": casas_exp,
+            "exp_notacao": notacao_exp,
+            "exp_rot": rotulo_exp
+        })
 
         sub_exp = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
 
@@ -1431,7 +1634,7 @@ with abas_principais[6]:
         registrar_historico(
             f"7. Explorador ({dist_escolhida})",
             f"{nome_dist} | x1={x1_exp:g}, x2={x2_exp:g}",
-            res_exp_str, df_exp, rotulo=rotulo_exp
+            res_exp_str, df_exp, rotulo=rotulo_exp, aba_idx=6, snapshot=snap_exp_params
         )
 
     with col_graf_exp:
@@ -1472,7 +1675,7 @@ with abas_principais[6]:
 
 
 # ==============================================================================
-# ABA 8: HISTÓRICO DA CALCULADORA (EM CAIXINHA COM BOTÃO ✏️ E CONFIRMAR)
+# ABA 8: HISTÓRICO DA CALCULADORA (EM CAIXINHA COM BOTÃO ✏️, CONFIRMAR E CARREGAR)
 # ==============================================================================
 with abas_principais[7]:
     st.subheader("📜 Histórico de Cálculos da Sessão")
@@ -1595,12 +1798,12 @@ with abas_principais[7]:
                 r_id.markdown(f"<div class='hist-cell'><b>{item['id']}</b></div>", unsafe_allow_html=True)
                 r_hora.markdown(f"<div class='hist-cell'>{item['hora']}</div>", unsafe_allow_html=True)
 
-                # Nome atual do rótulo + botão ✏️ ao lado que abre o input sem recarregar a página
+                # Nome atual do rótulo + botão ✏️ ao lado (fecha automaticamente ao clicar fora)
                 r_rot.markdown(
                     f"""
-                    <div class="rotulo-view hist-cell" data-uid="{uid}" data-ver="{ver_form}"
+                    <div class="rotulo-view hist-cell" data-uid="{uid}" data-ver="{ver_form}" data-orig="{rot_atual}"
                          style="display:flex; align-items:center; gap:6px;">
-                        <span style="font-weight:600; color:{cor_rot};">{rot_exib}</span>
+                        <span class="rotulo-texto" style="font-weight:600; color:{cor_rot};">{rot_exib}</span>
                         <button type="button" class="btn-abrir-rename" title="Clique para renomear">✏️</button>
                     </div>
                     """,
@@ -1657,9 +1860,21 @@ with abas_principais[7]:
         for idx, item in enumerate(hist_filtrado):
             titulo_exp = f"#{item['id']} [{item['hora']}] — {item['aba']} | {item['resultado']}"
             with st.expander(titulo_exp, expanded=(idx == 0)):
-                st.markdown(f"**Parâmetros:** `{item['parametros']}`")
-                st.markdown(f"**Resultado Principal:** `{item['resultado']}`")
-                if item["detalhes"]:
-                    st.caption(f"ℹ️ {item['detalhes']}")
+                c_det_info, c_det_btn = st.columns([3.4, 1.3])
+                with c_det_info:
+                    st.markdown(f"**Parâmetros:** `{item['parametros']}`")
+                    st.markdown(f"**Resultado Principal:** `{item['resultado']}`")
+                    if item["detalhes"]:
+                        st.caption(f"ℹ️ {item['detalhes']}")
+                with c_det_btn:
+                    st.button(
+                        "🔎 Carregar parâmetros na aba",
+                        key=f"btn_load_{item['uid']}",
+                        on_click=cb_carregar_simulacao_na_aba,
+                        args=(item["uid"],),
+                        use_container_width=True,
+                        help="Preenche a aba deste modelo com os parâmetros desta simulação e leva você até lá sem registrar um novo cálculo."
+                    )
+
                 if item["tabela"] is not None:
                     st.table(item["tabela"].set_index(item["tabela"].columns[0]))
