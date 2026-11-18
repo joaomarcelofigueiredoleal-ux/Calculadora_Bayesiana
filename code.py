@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -23,6 +24,84 @@ if "historico_calculos" not in st.session_state:
     st.session_state["historico_calculos"] = []
 if "contador_historico" not in st.session_state:
     st.session_state["contador_historico"] = 0
+
+
+# ==============================================================================
+# CONVERSÃO AUTOMÁTICA DE INTEIROS PARA DECIMAIS (EX: 16 -> 0.16 | 05 -> 0.05)
+# ==============================================================================
+def normalizar_para_decimal(val, min_val=0.0):
+    """Converte valores > 1 puxando os dígitos para depois da vírgula (ex: 16 -> 0.16)."""
+    if val is None:
+        return float(min_val)
+    val = float(val)
+    if val > 1.0:
+        digitos_inteiros = len(str(int(abs(val))))
+        val = round(val / (10 ** digitos_inteiros), 10)
+    return max(float(min_val), min(1.0, val))
+
+
+def input_decimal_01(container, label, value, key, min_value=0.0, step=0.01, fmt="%.4f"):
+    """
+    Campo numérico para probabilidades e proporções em [0, 1] sem bloqueio de max_value=1.0
+    no frontend, convertendo inteiros digitados (ex: 16) automaticamente para 0.16.
+    """
+    if key in st.session_state and st.session_state[key] is not None:
+        if st.session_state[key] > 1.0:
+            st.session_state[key] = normalizar_para_decimal(st.session_state[key], min_value)
+
+    val_bruto = container.number_input(
+        label,
+        min_value=float(min_value),
+        value=float(value),
+        step=float(step),
+        format=fmt,
+        key=key
+    )
+    return normalizar_para_decimal(val_bruto, min_value)
+
+
+# Script JS invisível que converte inteiros digitados (inclusive com zero à esquerda, como "05" -> "0.05")
+# imediatamente ao pressionar Enter ou Tab nos campos decimais (step 0.01 ou 0.05).
+components.html(
+    """
+    <script>
+    (function() {
+        const doc = window.parent.document;
+        if (doc.__decimalAutoPullInstalled) return;
+        doc.__decimalAutoPullInstalled = true;
+
+        function converterSeInteiro(input) {
+            if (!input || input.tagName !== 'INPUT' || input.type !== 'number') return;
+            const step = input.getAttribute('step');
+            if (step !== '0.01' && step !== '0.05') return;
+
+            const raw = (input.value || '').trim();
+            // Se digitou apenas dígitos (ex: "16", "82", "5", "05") sem vírgula ou ponto
+            if (/^\\d+$/.test(raw) && raw !== '0' && raw !== '1') {
+                const novoValor = '0.' + raw;
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                    window.parent.HTMLInputElement.prototype, 'value'
+                ).set;
+                nativeSetter.call(input, novoValor);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }
+
+        doc.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                converterSeInteiro(e.target);
+            }
+        }, true);
+
+        doc.addEventListener('blur', function(e) {
+            converterSeInteiro(e.target);
+        }, true);
+    })();
+    </script>
+    """,
+    height=0
+)
 
 
 def registrar_historico(aba, resumo_params, resumo_resultado, df_tabela=None, detalhes_extras=""):
@@ -200,13 +279,11 @@ with abas_principais[0]:
                 nome_input = col_n.text_input(
                     f"{t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
                 )
-                priori_val = col_p.number_input(
-                    f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
-                    step=0.01, format="%.4f", key=f"disc_p_{i}"
+                priori_val = input_decimal_01(
+                    col_p, f"P({s_a}{i+1}) [Priori]:", value=padrao_p, key=f"disc_p_{i}"
                 )
-                veros_val = col_v.number_input(
-                    f"P({ev} | {s_a}{i+1}) [Verossim.]:", min_value=0.0, max_value=1.0, value=padrao_c,
-                    step=0.01, format="%.4f", key=f"disc_v_{i}"
+                veros_val = input_decimal_01(
+                    col_v, f"P({ev} | {s_a}{i+1}) [Verossim.]:", value=padrao_c, key=f"disc_v_{i}"
                 )
                 estados_raw.append({
                     "nome_input": nome_input,
@@ -221,9 +298,8 @@ with abas_principais[0]:
                 nome_input = col_n.text_input(
                     f"Nome da {t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
                 )
-                priori_val = col_p.number_input(
-                    f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
-                    step=0.01, format="%.4f", key=f"disc_p_{i}"
+                priori_val = input_decimal_01(
+                    col_p, f"P({s_a}{i+1}) [Priori]:", value=padrao_p, key=f"disc_p_{i}"
                 )
 
                 subramos_i = []
@@ -236,15 +312,13 @@ with abas_principais[0]:
                         f"↳ Sub-ramo #{j+1} de {s_a}{i+1}:",
                         value="", placeholder=f"C{i+1}.{j+1}", key=f"sub_n_{i}_{j}"
                     )
-                    sub_p = cs_prob.number_input(
-                        f"P(C{i+1}.{j+1} | {s_a}{i+1}):",
-                        min_value=0.0, max_value=1.0, value=float(padrao_sub_p),
-                        step=0.01, format="%.4f", key=f"sub_p_{i}_{j}"
+                    sub_p = input_decimal_01(
+                        cs_prob, f"P(C{i+1}.{j+1} | {s_a}{i+1}):",
+                        value=float(padrao_sub_p), key=f"sub_p_{i}_{j}"
                     )
-                    sub_v = cs_ver.number_input(
-                        f"P({ev} | {s_a}{i+1} ∩ C{i+1}.{j+1}):",
-                        min_value=0.0, max_value=1.0, value=float(padrao_sub_v),
-                        step=0.01, format="%.4f", key=f"sub_v_{i}_{j}"
+                    sub_v = input_decimal_01(
+                        cs_ver, f"P({ev} | {s_a}{i+1} ∩ C{i+1}.{j+1}):",
+                        value=float(padrao_sub_v), key=f"sub_v_{i}_{j}"
                     )
                     subramos_i.append({
                         "nome": sub_nome.strip() if sub_nome.strip() else f"C{i+1}.{j+1}",
@@ -265,9 +339,8 @@ with abas_principais[0]:
                 nome_input = col_n.text_input(
                     f"Nome da {t_a} #{i+1}:", value="", placeholder=f"{s_a}{i+1}", key=f"disc_nome_{i}"
                 )
-                priori_val = col_p.number_input(
-                    f"P({s_a}{i+1}) [Priori]:", min_value=0.0, max_value=1.0, value=padrao_p,
-                    step=0.01, format="%.4f", key=f"disc_p_{i}"
+                priori_val = input_decimal_01(
+                    col_p, f"P({s_a}{i+1}) [Priori]:", value=padrao_p, key=f"disc_p_{i}"
                 )
 
                 cols_etapas = st.columns(num_subramos)
@@ -275,10 +348,9 @@ with abas_principais[0]:
                 prod_v = 1.0
                 for j in range(num_subramos):
                     padrao_et = round(padrao_c ** (1.0 / num_subramos), 4) if padrao_c > 0 else 0.5
-                    val_et = cols_etapas[j].number_input(
-                        f"↳ Etapa #{j+1} P(E{j+1} | {s_a}{i+1}):",
-                        min_value=0.0, max_value=1.0, value=float(padrao_et),
-                        step=0.01, format="%.4f", key=f"et_v_{i}_{j}"
+                    val_et = input_decimal_01(
+                        cols_etapas[j], f"↳ Etapa #{j+1} P(E{j+1} | {s_a}{i+1}):",
+                        value=float(padrao_et), key=f"et_v_{i}_{j}"
                     )
                     prod_v *= val_et
                     etapas_i.append({
@@ -442,7 +514,6 @@ with abas_principais[0]:
 
         with sub_disc[2]:
             if modo_veros.startswith("Sub-ramificações Paralelas"):
-                # Diagrama de Árvore de 3 níveis (Início -> Ai -> Sub-ramo C -> Evento B / Não B)
                 total_sub_ativos = sum(len(estados_dict[n]["subramos"]) for n in nomes_lista)
                 fig_tree, ax_tree = plt.subplots(figsize=(13.5, max(5.5, total_sub_ativos * 1.45)))
                 ax_tree.axis('off')
@@ -461,9 +532,8 @@ with abas_principais[0]:
                         y_c = 1.0 - idx_c_global * y_step_c
                         ys_deste_a.append((y_c, s))
 
-                    y_a = np.mean([ par[0] for par in ys_deste_a ])
+                    y_a = np.mean([par[0] for par in ys_deste_a])
 
-                    # Ramo Nível 1: Início -> Ai
                     ax_tree.plot([0.08, 0.88], [0.5, y_a], 'k-', lw=1.6)
                     ax_tree.text(
                         0.48, (0.5 + y_a)/2 + 0.015, f"P({nome})={pri:.4g}",
@@ -474,7 +544,6 @@ with abas_principais[0]:
                         bbox=dict(boxstyle='round,pad=0.45', fc='lightblue', ec='blue')
                     )
 
-                    # Ramos Nível 2 e 3: Ai -> C -> Ev / Não Ev
                     for y_c, s in ys_deste_a:
                         p_sub = s["p_sub"]
                         p_ev_sub = s["p_ev_sub"]
@@ -494,7 +563,6 @@ with abas_principais[0]:
                         y_up = y_c + y_step_c / 3.3
                         y_down = y_c - y_step_c / 3.3
 
-                        # Sub-ramo para Evento B
                         ax_tree.plot([2.34, 3.35], [y_c, y_up], 'k-', lw=1.3)
                         ax_tree.text(
                             2.85, (y_c + y_up)/2 + 0.01, f"P({ev}|{nome},{nome_c})={p_ev_sub:.4g}",
@@ -509,7 +577,6 @@ with abas_principais[0]:
                             ha='left', va='center', fontsize=8.8, fontweight='bold'
                         )
 
-                        # Sub-ramo para Não Evento B
                         ax_tree.plot([2.34, 3.35], [y_c, y_down], 'k--', lw=1.1, alpha=0.55)
                         ax_tree.text(
                             2.85, (y_c + y_down)/2 - 0.01, f"1-P={p_nao_ev_sub:.4g}",
@@ -532,7 +599,6 @@ with abas_principais[0]:
                 plt.close(fig_tree)
 
             else:
-                # Diagrama de Árvore Padrão ou com Etapas em Série anotadas no ramo da verossimilhança
                 fig_tree, ax_tree = plt.subplots(figsize=(11.5, max(4.5, num_estados * 1.65)))
                 ax_tree.axis('off')
                 ax_tree.text(0, 0.5, 'Início', ha='center', va='center', bbox=dict(boxstyle='round,pad=0.5', fc='white', ec='gray'))
@@ -602,8 +668,8 @@ with abas_principais[1]:
         bb_k = c4.number_input("Sucessos (k):", min_value=0, value=3, step=1, key="bb_k")
 
         c5, c6, c7 = st.columns(3)
-        bb_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.50, step=0.05, format="%.4f", key="bb_x1")
-        bb_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.80, step=0.05, format="%.4f", key="bb_x2")
+        bb_x1 = input_decimal_01(c5, "Limite x1:", value=0.50, step=0.05, key="bb_x1")
+        bb_x2 = input_decimal_01(c6, "Limite x2:", value=0.80, step=0.05, key="bb_x2")
         bb_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bb_casas")
 
         sub_bb = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
@@ -645,8 +711,8 @@ with abas_principais[2]:
         bg_m = c4.number_input("Sequências (sucessos):", min_value=1, value=12, step=1, key="bg_m")
 
         c5, c6, c7 = st.columns(3)
-        bg_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.25, step=0.05, format="%.4f", key="bg_x1")
-        bg_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.62, step=0.05, format="%.4f", key="bg_x2")
+        bg_x1 = input_decimal_01(c5, "Limite x1:", value=0.25, step=0.05, key="bg_x1")
+        bg_x2 = input_decimal_01(c6, "Limite x2:", value=0.62, step=0.05, key="bg_x2")
         bg_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bg_casas")
 
         sub_bg = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
@@ -688,8 +754,8 @@ with abas_principais[3]:
         bbn_r = c4.number_input("Sucessos fixos (r):", min_value=1, value=9, step=1, key="bbn_r")
 
         c5, c6, c7 = st.columns(3)
-        bbn_x1 = c5.number_input("Limite x1:", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.4f", key="bbn_x1")
-        bbn_x2 = c6.number_input("Limite x2:", min_value=0.0, max_value=1.0, value=0.75, step=0.05, format="%.4f", key="bbn_x2")
+        bbn_x1 = input_decimal_01(c5, "Limite x1:", value=0.30, step=0.05, key="bbn_x1")
+        bbn_x2 = input_decimal_01(c6, "Limite x2:", value=0.75, step=0.05, key="bbn_x2")
         bbn_casas = c7.number_input("Casas decimais:", min_value=1, max_value=10, value=5, step=1, key="bbn_casas")
 
         sub_bbn = st.form_submit_button("🔄 Calcular / Atualizar", type="primary")
@@ -848,7 +914,7 @@ with abas_principais[6]:
 
         if dist_escolhida == "Binomial":
             n_val = col_p1.number_input("n (Ensaios):", min_value=1, value=10, step=1)
-            p_val = col_p2.number_input("p (Sucesso):", min_value=0.0, max_value=1.0, value=0.30, step=0.05, format="%.4f")
+            p_val = input_decimal_01(col_p2, "p (Sucesso):", value=0.30, step=0.05, key="exp_binom_p")
             dist = binom(n=n_val, p=p_val)
             nome_dist = f"Binomial(n={n_val}, p={p_val:g})"
             is_discrete, suporte_finito = True, True
@@ -864,7 +930,7 @@ with abas_principais[6]:
 
         elif dist_escolhida == "Binomial Negativa":
             r_val = col_p1.number_input("r (Sucessos):", min_value=1, value=5, step=1)
-            p_val = col_p2.number_input("p (Sucesso):", min_value=0.0001, max_value=1.0, value=0.30, step=0.05, format="%.4f")
+            p_val = input_decimal_01(col_p2, "p (Sucesso):", value=0.30, min_value=0.0001, step=0.05, key="exp_nbinom_p")
             xmax_val = st.number_input("x_max (Gráfico/Tabela):", min_value=1, value=25, step=1)
             dist = nbinom(n=r_val, p=p_val)
             nome_dist = f"Binomial Negativa(r={r_val}, p={p_val:g})"
@@ -872,7 +938,7 @@ with abas_principais[6]:
             suporte_min, suporte_max = 0, xmax_val
 
         elif dist_escolhida == "Geométrica":
-            p_val = col_p1.number_input("p (Sucesso):", min_value=0.0001, max_value=1.0, value=0.30, step=0.05, format="%.4f")
+            p_val = input_decimal_01(col_p1, "p (Sucesso):", value=0.30, min_value=0.0001, step=0.05, key="exp_geom_p")
             xmax_val = col_p2.number_input("x_max (Gráfico/Tabela):", min_value=1, value=20, step=1)
             dist = geom(p=p_val)
             nome_dist = f"Geométrica(p={p_val:g})"
@@ -946,8 +1012,12 @@ with abas_principais[6]:
             suporte_min, suporte_max = loc_c - 6 * sc_c, loc_c + 6 * sc_c
 
         cx1, cx2, ccas, cnot = st.columns([1, 1, 1, 1])
-        x1_exp = cx1.number_input("Valor x1:", value=0.25 if dist_escolhida == "Beta" else 3.0, step=0.1, format="%.4f", key="exp_x1")
-        x2_exp = cx2.number_input("Valor x2:", value=0.62 if dist_escolhida == "Beta" else 7.0, step=0.1, format="%.4f", key="exp_x2")
+        if dist_escolhida == "Beta":
+            x1_exp = input_decimal_01(cx1, "Valor x1:", value=0.25, step=0.05, key="exp_beta_x1")
+            x2_exp = input_decimal_01(cx2, "Valor x2:", value=0.62, step=0.05, key="exp_beta_x2")
+        else:
+            x1_exp = cx1.number_input("Valor x1:", value=3.0, step=0.1, format="%.4f", key="exp_x1")
+            x2_exp = cx2.number_input("Valor x2:", value=7.0, step=0.1, format="%.4f", key="exp_x2")
         casas_exp = ccas.number_input("Casas decimais:", min_value=1, max_value=12, value=6, step=1, key="exp_casas")
         notacao_exp = cnot.checkbox("Notação científica", value=False)
 
@@ -1076,7 +1146,6 @@ with abas_principais[7]:
         if ordem_hist == "Mais recentes primeiro":
             hist_filtrado = list(reversed(hist_filtrado))
 
-        # Tabela-resumo rápida de todos os cálculos filtrados
         with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico", expanded=True):
             df_resumo_hist = pd.DataFrame([
                 {
