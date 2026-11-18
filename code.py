@@ -158,79 +158,104 @@ def atualizar_rotulo_item(item, novo_rotulo):
 
 # Script JS invisível:
 # 1) Seleciona automaticamente todo o texto ao focar/clicar em qualquer input numérico
-# 2) Puxa inteiros digitados (ex: "16", "82", "5", "05") para depois da vírgula nos campos decimais
+# 2) Puxa inteiros digitados (ex: "27" -> "0.27", "05" -> "0.05") instantaneamente no Tab, Enter ou clique fora
 # 3) Abre o campo de renomear rótulo no Histórico ao clicar no botão ✏️ ao lado do nome atual (sem rerun)
 components.html(
     """
     <script>
     (function() {
-        const doc = window.parent.document;
+        const win = window.parent;
+        const doc = win.document;
 
-        if (!doc.__bayesLabQoLInstalled) {
-            doc.__bayesLabQoLInstalled = true;
+        if (win.__bayesLabCleanup) {
+            try { win.__bayesLabCleanup(); } catch (e) {}
+        }
 
-            function converterSeInteiro(input) {
-                if (!input || input.tagName !== 'INPUT') return;
-                const step = input.getAttribute('step');
-                if (step !== '0.01' && step !== '0.05') return;
+        function converterSeInteiro(input) {
+            if (!input || input.tagName !== 'INPUT') return;
+            const step = input.getAttribute('step');
+            if (step !== '0.01' && step !== '0.05') return;
 
-                const raw = (input.value || '').trim();
-                if (/^\\d+$/.test(raw) && raw !== '0' && raw !== '1') {
-                    const novoValor = '0.' + raw;
-                    const nativeSetter = Object.getOwnPropertyDescriptor(
-                        window.parent.HTMLInputElement.prototype, 'value'
-                    ).set;
-                    nativeSetter.call(input, novoValor);
-                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                    input.dispatchEvent(new Event('change', { bubbles: true }));
+            const raw = (input.value || '').trim();
+            const match = raw.match(/^(\\d+)(?:[.,]0+)?$/);
+            if (!match) return;
+
+            const intPart = match[1];
+            if (intPart !== '0' && intPart !== '1') {
+                const novoValor = '0.' + intPart;
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                    win.HTMLInputElement.prototype, 'value'
+                ).set;
+
+                const tracker = input._valueTracker;
+                if (tracker) {
+                    tracker.setValue(raw);
                 }
+
+                nativeSetter.call(input, novoValor);
+                input.dispatchEvent(new win.Event('input', { bubbles: true }));
+                input.dispatchEvent(new win.Event('change', { bubbles: true }));
             }
+        }
 
-            doc.addEventListener('focusin', function(e) {
-                const el = e.target;
-                if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.hasAttribute('step'))) {
-                    setTimeout(function() {
-                        try { el.select(); } catch (err) {}
-                    }, 15);
-                }
-            }, true);
+        function onFocusIn(e) {
+            const el = e.target;
+            if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.hasAttribute('step'))) {
+                setTimeout(function() {
+                    try { el.select(); } catch (err) {}
+                }, 15);
+            }
+        }
 
-            doc.addEventListener('keydown', function(e) {
-                if (e.key === 'Enter' || e.key === 'Tab') {
-                    converterSeInteiro(e.target);
-                }
-            }, true);
-
-            doc.addEventListener('blur', function(e) {
+        function onKeyDown(e) {
+            if (e.key === 'Enter' || e.key === 'Tab') {
                 converterSeInteiro(e.target);
-            }, true);
+            }
         }
 
-        if (!doc.__bayesLabRenameBtnInstalled) {
-            doc.__bayesLabRenameBtnInstalled = true;
-
-            doc.addEventListener('click', function(e) {
-                const btn = e.target.closest('.btn-abrir-rename');
-                if (!btn) return;
-                e.preventDefault();
-                e.stopPropagation();
-
-                const viewDiv = btn.closest('.rotulo-view');
-                if (!viewDiv) return;
-                viewDiv.classList.add('editando');
-
-                const elContainer = viewDiv.closest('.element-container, [data-testid="stElementContainer"]');
-                if (elContainer && elContainer.nextElementSibling) {
-                    setTimeout(function() {
-                        const inp = elContainer.nextElementSibling.querySelector('input[type="text"]');
-                        if (inp) {
-                            inp.focus();
-                            inp.select();
-                        }
-                    }, 20);
-                }
-            }, true);
+        function onFocusOut(e) {
+            const el = e.target;
+            converterSeInteiro(el);
+            setTimeout(function() {
+                converterSeInteiro(el);
+            }, 10);
         }
+
+        function onClick(e) {
+            const btn = e.target.closest ? e.target.closest('.btn-abrir-rename') : null;
+            if (!btn) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            const viewDiv = btn.closest('.rotulo-view');
+            if (!viewDiv) return;
+            viewDiv.classList.add('editando');
+
+            const elContainer = viewDiv.closest('.element-container, [data-testid="stElementContainer"]');
+            if (elContainer && elContainer.nextElementSibling) {
+                setTimeout(function() {
+                    const inp = elContainer.nextElementSibling.querySelector('input[type="text"]');
+                    if (inp) {
+                        inp.focus();
+                        inp.select();
+                    }
+                }, 20);
+            }
+        }
+
+        win.addEventListener('focusin', onFocusIn, true);
+        win.addEventListener('keydown', onKeyDown, true);
+        win.addEventListener('focusout', onFocusOut, true);
+        win.addEventListener('blur', onFocusOut, true);
+        doc.addEventListener('click', onClick, true);
+
+        win.__bayesLabCleanup = function() {
+            win.removeEventListener('focusin', onFocusIn, true);
+            win.removeEventListener('keydown', onKeyDown, true);
+            win.removeEventListener('focusout', onFocusOut, true);
+            win.removeEventListener('blur', onFocusOut, true);
+            doc.removeEventListener('click', onClick, true);
+        };
     })();
     </script>
     """,
@@ -1605,7 +1630,6 @@ with abas_principais[7]:
 
         if sub_confirmar_hist:
             uids_excluir = set()
-            qtd_renomeados = 0
 
             for orig_item in st.session_state["historico_calculos"]:
                 uid = orig_item["uid"]
@@ -1618,7 +1642,6 @@ with abas_principais[7]:
                 novo_rot_limpo = str(novo_rot).strip() if novo_rot is not None else ""
                 if novo_rot_limpo != orig_item.get("rotulo", ""):
                     atualizar_rotulo_item(orig_item, novo_rot_limpo)
-                    qtd_renomeados += 1
 
             if uids_excluir:
                 st.session_state["historico_calculos"] = [
