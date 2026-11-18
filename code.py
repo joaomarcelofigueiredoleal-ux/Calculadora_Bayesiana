@@ -28,6 +28,8 @@ if "historico_calculos" not in st.session_state:
     st.session_state["historico_calculos"] = []
 if "contador_historico" not in st.session_state:
     st.session_state["contador_historico"] = 0
+if "hist_form_ver" not in st.session_state:
+    st.session_state["hist_form_ver"] = 0
 
 
 def renumerar_historico():
@@ -152,67 +154,83 @@ def atualizar_rotulo_item(item, novo_rotulo):
     item["aba_base"] = aba_base
     item["rotulo"] = rot
     item["aba"] = f"{aba_base} [{rot}]" if rot else aba_base
-    key_input = f"edit_rot_{item['uid']}"
-    if key_input in st.session_state:
-        st.session_state[key_input] = rot
-
-
-def cb_renomear_item_card(item_uid, key_input):
-    """Callback para renomear o rótulo a partir do campo dentro do card do histórico."""
-    novo_rot = st.session_state.get(key_input, "")
-    for h in st.session_state["historico_calculos"]:
-        if h["uid"] == item_uid:
-            atualizar_rotulo_item(h, novo_rot)
-            break
 
 
 # Script JS invisível:
-# 1) Seleciona automaticamente todo o texto ao focar/clicar em qualquer input numérico (sem precisar de Backspace)
-# 2) Puxa inteiros digitados (ex: "16", "82", "5", "05") para depois da vírgula nos campos decimais (step 0.01 / 0.05)
+# 1) Seleciona automaticamente todo o texto ao focar/clicar em qualquer input numérico
+# 2) Puxa inteiros digitados (ex: "16", "82", "5", "05") para depois da vírgula nos campos decimais
+# 3) Abre o campo de renomear rótulo no Histórico ao clicar no botão ✏️ ao lado do nome atual (sem rerun)
 components.html(
     """
     <script>
     (function() {
         const doc = window.parent.document;
-        if (doc.__bayesLabQoLInstalled) return;
-        doc.__bayesLabQoLInstalled = true;
 
-        function converterSeInteiro(input) {
-            if (!input || input.tagName !== 'INPUT') return;
-            const step = input.getAttribute('step');
-            if (step !== '0.01' && step !== '0.05') return;
+        if (!doc.__bayesLabQoLInstalled) {
+            doc.__bayesLabQoLInstalled = true;
 
-            const raw = (input.value || '').trim();
-            if (/^\\d+$/.test(raw) && raw !== '0' && raw !== '1') {
-                const novoValor = '0.' + raw;
-                const nativeSetter = Object.getOwnPropertyDescriptor(
-                    window.parent.HTMLInputElement.prototype, 'value'
-                ).set;
-                nativeSetter.call(input, novoValor);
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
+            function converterSeInteiro(input) {
+                if (!input || input.tagName !== 'INPUT') return;
+                const step = input.getAttribute('step');
+                if (step !== '0.01' && step !== '0.05') return;
+
+                const raw = (input.value || '').trim();
+                if (/^\\d+$/.test(raw) && raw !== '0' && raw !== '1') {
+                    const novoValor = '0.' + raw;
+                    const nativeSetter = Object.getOwnPropertyDescriptor(
+                        window.parent.HTMLInputElement.prototype, 'value'
+                    ).set;
+                    nativeSetter.call(input, novoValor);
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
             }
+
+            doc.addEventListener('focusin', function(e) {
+                const el = e.target;
+                if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.hasAttribute('step'))) {
+                    setTimeout(function() {
+                        try { el.select(); } catch (err) {}
+                    }, 15);
+                }
+            }, true);
+
+            doc.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' || e.key === 'Tab') {
+                    converterSeInteiro(e.target);
+                }
+            }, true);
+
+            doc.addEventListener('blur', function(e) {
+                converterSeInteiro(e.target);
+            }, true);
         }
 
-        // Auto-select ao focar em qualquer campo numérico para digitação imediata
-        doc.addEventListener('focusin', function(e) {
-            const el = e.target;
-            if (el && el.tagName === 'INPUT' && (el.type === 'number' || el.hasAttribute('step'))) {
-                setTimeout(function() {
-                    try { el.select(); } catch (err) {}
-                }, 15);
-            }
-        }, true);
+        if (!doc.__bayesLabRenameBtnInstalled) {
+            doc.__bayesLabRenameBtnInstalled = true;
 
-        doc.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' || e.key === 'Tab') {
-                converterSeInteiro(e.target);
-            }
-        }, true);
+            doc.addEventListener('click', function(e) {
+                const btn = e.target.closest('.btn-abrir-rename');
+                if (!btn) return;
+                e.preventDefault();
+                e.stopPropagation();
 
-        doc.addEventListener('blur', function(e) {
-            converterSeInteiro(e.target);
-        }, true);
+                const viewDiv = btn.closest('.rotulo-view');
+                if (!viewDiv) return;
+                viewDiv.classList.add('editando');
+
+                const elContainer = viewDiv.closest('.element-container, [data-testid="stElementContainer"]');
+                if (elContainer && elContainer.nextElementSibling) {
+                    setTimeout(function() {
+                        const inp = elContainer.nextElementSibling.querySelector('input[type="text"]');
+                        if (inp) {
+                            inp.focus();
+                            inp.select();
+                        }
+                    }, 20);
+                }
+            }, true);
+        }
     })();
     </script>
     """,
@@ -1429,14 +1447,48 @@ with abas_principais[6]:
 
 
 # ==============================================================================
-# ABA 8: HISTÓRICO DA CALCULADORA (COM LIXEIRA POR LINHA, RENUMERAÇÃO E EDIÇÃO)
+# ABA 8: HISTÓRICO DA CALCULADORA (EM CAIXINHA COM BOTÃO ✏️ E CONFIRMAR)
 # ==============================================================================
 with abas_principais[7]:
     st.subheader("📜 Histórico de Cálculos da Sessão")
     st.caption(
         "Todos os cálculos confirmados no botão **'🔄 Calcular / Atualizar'** ficam registrados aqui. "
-        "💡 **Para renomear**, dê dois cliques na coluna **'🏷️ Rótulo'**. "
-        "**Para apagar uma linha**, basta clicar na caixinha da coluna **'🗑️'** (os números **'#'** se reajustam automaticamente)."
+        "💡 Clique no botão **'✏️'** ao lado do rótulo atual para renomear ou marque as caixinhas **'🗑️'** que deseja apagar e clique em **'✅ Confirmar'**."
+    )
+
+    st.markdown(
+        """
+        <style>
+        /* Esconde o campo de texto de renomear até que o botão ✏️ ao lado do nome seja clicado */
+        div.element-container:has(.rotulo-view:not(.editando)) + div.element-container,
+        div[data-testid="stElementContainer"]:has(.rotulo-view:not(.editando)) + div[data-testid="stElementContainer"] {
+            display: none !important;
+        }
+        /* Quando o botão ✏️ é clicado, esconde o rótulo estático e exibe o input no mesmo lugar */
+        div.element-container:has(.rotulo-view.editando),
+        div[data-testid="stElementContainer"]:has(.rotulo-view.editando) {
+            display: none !important;
+        }
+        .btn-abrir-rename {
+            cursor: pointer;
+            border: 1px solid rgba(128, 128, 128, 0.35);
+            background: rgba(128, 128, 128, 0.08);
+            border-radius: 6px;
+            padding: 2px 7px;
+            font-size: 0.82rem;
+            line-height: 1.2;
+            transition: background 0.15s;
+        }
+        .btn-abrir-rename:hover {
+            background: rgba(128, 128, 128, 0.22);
+        }
+        .hist-cell {
+            font-size: 0.9rem;
+            padding-top: 4px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
     )
 
     hist = st.session_state["historico_calculos"]
@@ -1457,22 +1509,20 @@ with abas_principais[7]:
         if ordem_hist == "Mais recentes primeiro":
             hist_filtrado = list(reversed(hist_filtrado))
 
-        df_resumo_hist = pd.DataFrame([
+        df_csv = pd.DataFrame([
             {
                 "#": item["id"],
                 "Hora": item["hora"],
                 "🏷️ Rótulo": item.get("rotulo", ""),
                 "Aba / Modelo": item["aba"],
                 "Parâmetros Utilizados": item["parametros"],
-                "Resultado Principal": item["resultado"],
-                "🗑️": False
+                "Resultado Principal": item["resultado"]
             }
             for item in hist_filtrado
         ])
 
         col_csv.write("")
         col_csv.write("")
-        df_csv = df_resumo_hist.drop(columns=["🗑️"])
         csv_bytes = df_csv.to_csv(index=False).encode("utf-8-sig")
         col_csv.download_button(
             "📥 Baixar CSV",
@@ -1487,107 +1537,106 @@ with abas_principais[7]:
         if col_del_all.button("🗑️ Deletar Tudo", type="primary", use_container_width=True):
             st.session_state["historico_calculos"] = []
             st.session_state["contador_historico"] = 0
+            st.session_state["hist_form_ver"] += 1
             st.rerun()
 
-        with st.expander("📊 Ver Tabela-Resumo Comparativa do Histórico (Clique duplo para editar Rótulo | Clique em 🗑️ para excluir linha)", expanded=True):
-            df_editado = st.data_editor(
-                df_resumo_hist,
-                use_container_width=True,
-                hide_index=True,
-                disabled=["#", "Hora", "Parâmetros Utilizados", "Resultado Principal"],
-                column_config={
-                    "#": st.column_config.NumberColumn("#", width="small"),
-                    "Hora": st.column_config.TextColumn("Hora", width="small"),
-                    "🏷️ Rótulo": st.column_config.TextColumn(
-                        "🏷️ Rótulo",
-                        help="Dê dois cliques para editar o número/nome da questão (ex: 26, 27)",
-                        width="small"
-                    ),
-                    "Aba / Modelo": st.column_config.TextColumn(
-                        "Aba / Modelo",
-                        help="Você também pode editar o rótulo entre colchetes diretamente aqui (ex: 1. Teorema de Bayes [26])"
-                    ),
-                    "🗑️": st.column_config.CheckboxColumn(
-                        "🗑️",
-                        help="Clique aqui para excluir esta linha imediatamente (as tags '#' serão renumeradas)",
-                        default=False,
-                        width="small"
-                    )
-                },
-                key="editor_tabela_historico"
+        # Caixinha principal do Histórico (st.form): nenhuma ação recarrega a página até clicar em Confirmar
+        ver_form = st.session_state["hist_form_ver"]
+        with st.form("form_historico_principal"):
+            st.markdown("##### 📊 Tabela-Resumo Comparativa do Histórico")
+
+            h_id, h_hora, h_rot, h_aba, h_param, h_res, h_del = st.columns(
+                [0.4, 0.75, 1.15, 1.55, 2.7, 2.7, 0.55]
             )
+            h_id.markdown("**#**")
+            h_hora.markdown("**Hora**")
+            h_rot.markdown("**🏷️ Rótulo**")
+            h_aba.markdown("**Aba / Modelo**")
+            h_param.markdown("**Parâmetros Utilizados**")
+            h_res.markdown("**Resultado Principal**")
+            h_del.markdown("**🗑️**")
+            st.divider()
 
-            # Verifica exclusões pela coluna 🗑️ e edições de rótulo na tabela
-            ids_para_excluir = set()
-            alterou_tabela = False
+            for item in hist_filtrado:
+                uid = item["uid"]
+                rot_atual = item.get("rotulo", "")
+                rot_exib = rot_atual if rot_atual else "—"
+                cor_rot = "inherit" if rot_atual else "#888"
 
-            for _, row in df_editado.iterrows():
-                id_alvo = int(row["#"])
-                if bool(row.get("🗑️", False)):
-                    ids_para_excluir.add(id_alvo)
+                r_id, r_hora, r_rot, r_aba, r_param, r_res, r_del = st.columns(
+                    [0.4, 0.75, 1.15, 1.55, 2.7, 2.7, 0.55]
+                )
+
+                r_id.markdown(f"<div class='hist-cell'><b>{item['id']}</b></div>", unsafe_allow_html=True)
+                r_hora.markdown(f"<div class='hist-cell'>{item['hora']}</div>", unsafe_allow_html=True)
+
+                # Nome atual do rótulo + botão ✏️ ao lado que abre o input sem recarregar a página
+                r_rot.markdown(
+                    f"""
+                    <div class="rotulo-view hist-cell" data-uid="{uid}" data-ver="{ver_form}"
+                         style="display:flex; align-items:center; gap:6px;">
+                        <span style="font-weight:600; color:{cor_rot};">{rot_exib}</span>
+                        <button type="button" class="btn-abrir-rename" title="Clique para renomear">✏️</button>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+                r_rot.text_input(
+                    "Rótulo",
+                    value=rot_atual,
+                    placeholder="Ex: 26",
+                    key=f"ren_in_{uid}_{ver_form}",
+                    label_visibility="collapsed"
+                )
+
+                r_aba.markdown(f"<div class='hist-cell'>{item['aba']}</div>", unsafe_allow_html=True)
+                r_param.markdown(f"<div class='hist-cell'>{item['parametros']}</div>", unsafe_allow_html=True)
+                r_res.markdown(f"<div class='hist-cell'>{item['resultado']}</div>", unsafe_allow_html=True)
+                r_del.checkbox(
+                    "Apagar",
+                    value=False,
+                    key=f"del_chk_{uid}_{ver_form}",
+                    label_visibility="collapsed",
+                    help="Marque para apagar esta simulação ao clicar em Confirmar"
+                )
+
+            st.write("")
+            sub_confirmar_hist = st.form_submit_button("✅ Confirmar", type="primary")
+
+        if sub_confirmar_hist:
+            uids_excluir = set()
+            qtd_renomeados = 0
+
+            for orig_item in st.session_state["historico_calculos"]:
+                uid = orig_item["uid"]
+                marcado_del = st.session_state.get(f"del_chk_{uid}_{ver_form}", False)
+                if marcado_del:
+                    uids_excluir.add(uid)
                     continue
 
-                novo_rot_tab = "" if pd.isna(row["🏷️ Rótulo"]) else str(row["🏷️ Rótulo"]).strip()
-                nova_aba_tab = "" if pd.isna(row["Aba / Modelo"]) else str(row["Aba / Modelo"]).strip()
+                novo_rot = st.session_state.get(f"ren_in_{uid}_{ver_form}", orig_item.get("rotulo", ""))
+                novo_rot_limpo = str(novo_rot).strip() if novo_rot is not None else ""
+                if novo_rot_limpo != orig_item.get("rotulo", ""):
+                    atualizar_rotulo_item(orig_item, novo_rot_limpo)
+                    qtd_renomeados += 1
 
-                for orig_item in st.session_state["historico_calculos"]:
-                    if orig_item["id"] == id_alvo:
-                        rot_atual = orig_item.get("rotulo", "")
-                        aba_atual = orig_item.get("aba", "")
-
-                        if novo_rot_tab != rot_atual:
-                            atualizar_rotulo_item(orig_item, novo_rot_tab)
-                            alterou_tabela = True
-                        elif nova_aba_tab != aba_atual and nova_aba_tab:
-                            m_aba = re.match(r"^(.*?)\s*\[(.*)\]$", nova_aba_tab)
-                            if m_aba:
-                                orig_item["aba_base"] = m_aba.group(1).strip()
-                                atualizar_rotulo_item(orig_item, m_aba.group(2).strip())
-                            else:
-                                orig_item["aba_base"] = nova_aba_tab
-                                atualizar_rotulo_item(orig_item, "")
-                            alterou_tabela = True
-                        break
-
-            if ids_para_excluir:
+            if uids_excluir:
                 st.session_state["historico_calculos"] = [
                     h for h in st.session_state["historico_calculos"]
-                    if h["id"] not in ids_para_excluir
+                    if h["uid"] not in uids_excluir
                 ]
-                renumerar_historico()
-                st.rerun()
-            elif alterou_tabela:
-                st.rerun()
+
+            renumerar_historico()
+            st.session_state["hist_form_ver"] += 1
+            st.rerun()
 
         st.markdown("##### 🗂️ Detalhes de Cada Cálculo")
         for idx, item in enumerate(hist_filtrado):
             titulo_exp = f"#{item['id']} [{item['hora']}] — {item['aba']} | {item['resultado']}"
             with st.expander(titulo_exp, expanded=(idx == 0)):
-                c_det, c_ren, c_btn = st.columns([3.3, 1.3, 0.8])
-                with c_det:
-                    st.markdown(f"**Parâmetros:** `{item['parametros']}`")
-                    st.markdown(f"**Resultado Principal:** `{item['resultado']}`")
-                    if item["detalhes"]:
-                        st.caption(f"ℹ️ {item['detalhes']}")
-                with c_ren:
-                    key_ren = f"edit_rot_{item['uid']}"
-                    st.text_input(
-                        "🏷️ Rótulo / Questão:",
-                        value=item.get("rotulo", ""),
-                        placeholder="Ex: 26",
-                        key=key_ren,
-                        on_change=cb_renomear_item_card,
-                        args=(item["uid"], key_ren)
-                    )
-                with c_btn:
-                    st.write("")
-                    st.write("")
-                    if st.button("🗑️ Excluir", key=f"del_item_{item['uid']}", use_container_width=True):
-                        st.session_state["historico_calculos"] = [
-                            h for h in st.session_state["historico_calculos"] if h["uid"] != item["uid"]
-                        ]
-                        renumerar_historico()
-                        st.rerun()
-
+                st.markdown(f"**Parâmetros:** `{item['parametros']}`")
+                st.markdown(f"**Resultado Principal:** `{item['resultado']}`")
+                if item["detalhes"]:
+                    st.caption(f"ℹ️ {item['detalhes']}")
                 if item["tabela"] is not None:
                     st.table(item["tabela"].set_index(item["tabela"].columns[0]))
